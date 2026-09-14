@@ -4,12 +4,12 @@
 
 **AI-Powered Xiaohongshu User Pain Point Discovery & Analysis Platform**
 
-[![GitHub Stars](https://img.shields.io/github/stars/YOUR_USERNAME/xhs-pain-miner?style=social&label=Stars)](https://github.com/YOUR_USERNAME/xhs-pain-miner)
-[![GitHub Forks](https://img.shields.io/github/forks/YOUR_USERNAME/xhs-pain-miner?style=social&label=Forks)](https://github.com/YOUR_USERNAME/xhs-pain-miner)
-[![GitHub Issues](https://img.shields.io/github/issues/YOUR_USERNAME/xhs-pain-miner)](https://github.com/YOUR_USERNAME/xhs-pain-miner/issues)
+[![GitHub Stars](https://img.shields.io/github/stars/mahingbun-dev/xhs-pain-miner?style=social&label=Stars)](https://github.com/mahingbun-dev/xhs-pain-miner)
+[![GitHub Forks](https://img.shields.io/github/forks/mahingbun-dev/xhs-pain-miner?style=social&label=Forks)](https://github.com/mahingbun-dev/xhs-pain-miner)
+[![GitHub Issues](https://img.shields.io/github/issues/mahingbun-dev/xhs-pain-miner)](https://github.com/mahingbun-dev/xhs-pain-miner/issues)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
-[![PRs Welcome](https://img.shields.io/badge/PRs-Welcome-brightgreen.svg)](https://github.com/YOUR_USERNAME/xhs-pain-miner/pulls)
+[![PRs Welcome](https://img.shields.io/badge/PRs-Welcome-brightgreen.svg)](https://github.com/mahingbun-dev/xhs-pain-miner/pulls)
 
 **从海量小红书笔记和评论中，用 AI 自动发现用户真实痛点和未被满足的需求**
 
@@ -49,7 +49,7 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/YOUR_USERNAME/xhs-pain-miner.git
+git clone https://github.com/mahingbun-dev/xhs-pain-miner.git
 cd xhs-pain-miner
 
 # 安装依赖
@@ -236,8 +236,8 @@ xhs-pain-miner serve --port 8080
 
 我们欢迎各种形式的贡献！
 
-- 🐛 提交 Bug Report（[Issue 模板](https://github.com/YOUR_USERNAME/xhs-pain-miner/issues/new?template=bug_report.md)）
-- 💡 提出新功能建议（[Feature Request](https://github.com/YOUR_USERNAME/xhs-pain-miner/issues/new?template=feature_request.md)）
+- 🐛 提交 Bug Report（[Issue 模板](https://github.com/mahingbun-dev/xhs-pain-miner/issues/new?template=bug_report.md)）
+- 💡 提出新功能建议（[Feature Request](https://github.com/mahingbun-dev/xhs-pain-miner/issues/new?template=feature_request.md)）
 - 📝 改进文档
 - 🧪 补充测试用例
 - 📸 提交截图 / 演示视频
@@ -258,9 +258,9 @@ xhs-pain-miner serve --port 8080
 
 ## 📬 联系方式
 
-- 💬 Discussions: [GitHub Discussions](https://github.com/YOUR_USERNAME/xhs-pain-miner/discussions)
-- 🐦 Twitter: [@YOUR_USERNAME](https://twitter.com/YOUR_USERNAME)
-- 📧 Email: your-email@example.com
+- 💬 Discussions: [GitHub Discussions](https://github.com/mahingbun-dev/xhs-pain-miner/discussions)
+- 🐦 Twitter: [@mahingbun-dev](https://twitter.com/mahingbun-dev)
+- 📧 Email: 332590574@qq.com
 
 ---
 

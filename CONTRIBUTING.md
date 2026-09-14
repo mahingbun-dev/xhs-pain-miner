@@ -35,7 +35,7 @@
 
 ## 🎯 Good First Issues
 
-我们为新贡献者准备了标记为 [`good first issue`](https://github.com/YOUR_USERNAME/xhs-pain-miner/labels/good%20first%20issue) 的任务。
+我们为新贡献者准备了标记为 [`good first issue`](https://github.com/mahingbun-dev/xhs-pain-miner/labels/good%20first%20issue) 的任务。
 
 ## ⭐ 贡献者
 
