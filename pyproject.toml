@@ -1,0 +1,85 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "xhs-pain-miner"
+version = "0.1.0"
+description = "🔍 AI-powered Xiaohongshu (小红书) user pain point discovery & analysis tool. Discover real user needs from comments, posts, and images using NLP + VLM."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "XHS Pain Miner Contributors"},
+]
+keywords = [
+    "xiaohongshu",
+    "小红书",
+    "rednote",
+    "pain-point",
+    "user-insights",
+    "nlp",
+    "sentiment-analysis",
+    "vlm",
+    "multimodal",
+    "social-media-analysis",
+    "consumer-insights",
+    "product-management",
+    "voice-of-customer",
+    "voc",
+    "user-research",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Text Processing :: Linguistic",
+]
+
+dependencies = [
+    "openai>=1.0",
+    "httpx>=0.24",
+    "rich>=13.0",
+    "pydantic>=2.0",
+    "click>=8.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+vlm = ["openai>=1.0"]
+web = ["fastapi>=0.104", "uvicorn>=0.24", "jinja2>=3.1"]
+all = ["openai>=1.0", "fastapi>=0.104", "uvicorn>=0.24", "jinja2>=3.1"]
+dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.1", "mypy>=1.0"]
+
+[project.urls]
+Homepage = "https://github.com/YOUR_USERNAME/xhs-pain-miner"
+Documentation = "https://github.com/YOUR_USERNAME/xhs-pain-miner#readme"
+Repository = "https://github.com/YOUR_USERNAME/xhs-pain-miner"
+Issues = "https://github.com/YOUR_USERNAME/xhs-pain-miner/issues"
+Changelog = "https://github.com/YOUR_USERNAME/xhs-pain-miner/releases"
+
+[project.scripts]
+xhs-pain-miner = "xhs_pain_miner.cli:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true

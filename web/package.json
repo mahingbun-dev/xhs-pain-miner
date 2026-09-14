@@ -1,0 +1,26 @@
+{
+  "name": "xhs-pain-miner-web",
+  "version": "0.1.0",
+  "description": "XHS Pain Miner — 交互式用户痛点分析仪表盘",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "next": "^14.0",
+    "react": "^18.0",
+    "react-dom": "^18.0",
+    "recharts": "^2.10",
+    "tailwindcss": "^3.4",
+    "d3-cloud": "^1.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0",
+    "@types/react": "^18.0",
+    "typescript": "^5.0",
+    "autoprefixer": "^10.0",
+    "postcss": "^8.0"
+  }
+}
