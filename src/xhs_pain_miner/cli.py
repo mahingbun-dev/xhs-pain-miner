@@ -27,7 +27,6 @@ from typing import Any
 import click
 from rich.console import Console
 from rich.markup import escape
-from rich.panel import Panel
 from rich.table import Table
 
 from xhs_pain_miner import __version__
@@ -36,11 +35,8 @@ from xhs_pain_miner.config import Settings, load_settings
 from xhs_pain_miner.diagnostics import has_blocking_issue, run_diagnostics
 from xhs_pain_miner.llm.base import LLMError
 from xhs_pain_miner.models import MiningResult
-from xhs_pain_miner.pain_miner import (
-    PainMiner,
-    PipelineNotAvailableError,
-    normalize_keyword,
-)
+from xhs_pain_miner.pain_miner import PainMiner, normalize_keyword
+from xhs_pain_miner.pipeline.deps import MissingDependencyError
 
 console = Console()
 err_console = Console(stderr=True)
@@ -135,14 +131,28 @@ def main() -> None:
     default=False,
     help="开启 VLM 图片分析（成本与耗时显著上升）",
 )
-@click.option("--output", "-o", type=click.Path(dir_okay=False), default=None, help="报告输出路径")
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="报告输出路径，按扩展名决定格式（.html 或 .md）",
+)
+@click.option("--no-save", is_flag=True, help="只打印终端摘要，不写报告文件")
+@click.option(
+    "--weights",
+    default=None,
+    help='覆盖机会分权重，如 "gap=0.4,trend=0.3"',
+)
 @click.option("--backend", type=BACKEND_CHOICES, default=None, help="覆盖采集后端")
-@click.option("--yes", "-y", is_flag=True, help="跳过成本预估确认")
+@click.option("--yes", "-y", is_flag=True, help="跳过 VLM 成本预估确认")
 def mine(
     keyword: str,
     notes: int | None,
     deep: bool,
     output: str | None,
+    no_save: bool,
+    weights: str | None,
     backend: str | None,
     yes: bool,
 ) -> None:
@@ -152,36 +162,95 @@ def mine(
     示例:
         xhs-pain-miner mine -k 防晒霜 -n 200
         xhs-pain-miner mine -k 防晒霜 --deep -o 防晒霜-机会卡片.html
+        xhs-pain-miner mine -k 防晒霜 --weights "gap=0.4,trend=0.3"
     """
-    settings = _build_settings(collector_backend=backend)
+    try:
+        settings = _build_settings(collector_backend=backend)
+        if weights:
+            settings = _apply_weights(settings, weights)
+    except ValueError as exc:
+        _fail(str(exc), code=EXIT_CONFIG)
+        return
 
     console.print(f"🔍 [bold]正在分析「{_safe(keyword)}」[/bold]")
     console.print(f"   采集后端: {_safe(settings.collector_backend)}")
     console.print(f"   笔记数量: {notes if notes is not None else settings.max_notes}")
     console.print(f"   图片分析: {'✅ 开启 (--deep)' if deep else '❌ 关闭'}")
 
+    try:
+        # 报告与 VLM 缓存都要落盘，先把目录建好 —— 否则会等到写文件那一刻才失败，
+        # 而那时一整轮 LLM 调用已经花掉了。
+        settings.ensure_dirs()
+    except OSError as exc:
+        _fail(f"无法创建输出目录: {exc}")
+        return
+
     miner = PainMiner(settings=settings)
     try:
-        result = miner.mine(keyword, notes_count=notes, deep=deep)
-    except PipelineNotAvailableError as exc:
-        err_console.print(Panel(_safe(exc), title="⏳ 功能开发中", border_style="yellow"))
-        raise SystemExit(EXIT_CONFIG) from None
+        # 采集放在 mine() 之外，是为了让「成本确认」发生在**任何 LLM 调用之前**，
+        # 且预估基于真实语料而不是猜测。
+        with console.status("正在采集…", spinner="dots"):
+            corpus = miner.collect(keyword, limit=notes)
+
+        if deep:
+            deep = _confirm_vlm_cost(miner, corpus, assume_yes=yes)
+
+        with console.status("分析中…", spinner="dots") as status:
+            result = miner.mine(
+                keyword,
+                corpus=corpus,
+                deep=deep,
+                progress=lambda stage, ratio: status.update(f"{stage} {ratio:.0%}"),
+            )
     except CollectorError as exc:
         _fail(f"采集失败：{exc}")
         return
     except LLMError as exc:
         _fail(f"模型调用失败：{exc}")
         return
+    except MissingDependencyError as exc:
+        _fail(str(exc), code=EXIT_CONFIG)
+        return
+    finally:
+        miner.close()
 
     _render_result(result)
-    if output:
-        console.print(f"\n✅ 报告已导出: {_safe(output)}")
+
+    if not no_save:
+        _write_report(result, output, settings.output_dir)
+
+
+def _confirm_vlm_cost(miner: PainMiner, corpus: object, *, assume_yes: bool) -> bool:
+    """展示图片分析成本预估并征求确认。
+
+    Returns:
+        是否继续做图片分析。**拒绝不会中断整次运行** —— 文本分析的结论依然有价值。
+    """
+    if not getattr(corpus, "notes", None):
+        console.print("[yellow]⚠️  没有采集到笔记，跳过图片分析。[/yellow]")
+        return False
+
+    try:
+        with console.status("正在预估图片分析成本…", spinner="dots"):
+            estimate = miner.estimate_vlm_cost(corpus)  # type: ignore[arg-type]
+    except (MissingDependencyError, OSError) as exc:
+        console.print(f"[yellow]⚠️  无法预估图片分析成本（{_safe(exc)}），跳过图片分析。[/yellow]")
+        return False
+
+    console.print(f"\n🖼  [bold]图片分析预估[/bold]  {_safe(estimate.summary())}")
+    if assume_yes:
+        return True
+    if click.confirm("继续发起 VLM 调用吗？", default=True):
+        return True
+    console.print("   [dim]已跳过图片分析，本次只分析文本。[/dim]")
+    return False
 
 
 def _render_result(result: MiningResult) -> None:
-    """打印分析结果。
+    """打印终端摘要。
 
-    完整的卡片渲染由 ``render`` 模块（M1 里程碑）负责，这里只给出终端摘要。
+    完整报告（含证据链与因子溯源）由 ``render`` 模块产出的 HTML 文件承载，
+    终端只给出够用的概览。
     """
     console.print(
         f"\n[bold]📊 {_safe(result.keyword)}[/bold] —— "
@@ -193,21 +262,118 @@ def _render_result(result: MiningResult) -> None:
     for message in result.notes:
         console.print(f"   [yellow]⚠️  {_safe(message)}[/yellow]")
 
+    if not result.cards:
+        console.print("\n[yellow]没有产出任何机会卡片。[/yellow]")
+        return
+
     table = Table(title="机会卡片", show_lines=False)
     table.add_column("机会分", justify="right")
-    table.add_column("方向", overflow="fold", max_width=48)
+    table.add_column("方向", overflow="fold", max_width=40)
+    table.add_column("痛点", overflow="fold", max_width=22)
     table.add_column("提及", justify="right")
     table.add_column("活跃竞品", justify="right")
 
-    for card in result.top_cards[:10]:
+    for card in result.top_cards[:15]:
         active = sum(1 for c in card.competitors if not c.is_stale)
         table.add_row(
             _safe(f"{card.score:.0f}"),
             _safe(card.title),
+            _safe(card.pain.label),
             _safe(card.pain.size),
             _safe(active),
         )
     console.print(table)
+
+
+_WEIGHT_FIELDS = {
+    "pain": "weight_pain_strength",
+    "pain_strength": "weight_pain_strength",
+    "volume": "weight_mention_volume",
+    "mention_volume": "weight_mention_volume",
+    "trend": "weight_growth_trend",
+    "growth_trend": "weight_growth_trend",
+    "gap": "weight_competitor_gap",
+    "competitor_gap": "weight_competitor_gap",
+    "feasibility": "weight_feasibility",
+}
+
+
+def _apply_weights(settings: Settings, spec: str) -> Settings:
+    """解析 ``--weights "gap=0.4,trend=0.3"`` 并写回配置。
+
+    Raises:
+        ValueError: 格式错误，或使用了未知的权重名。**未知键必须报错而不是忽略** ——
+            用户拼错一个键却以为调整生效了，是最难排查的一类问题。
+    """
+    updates: dict[str, float] = {}
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        key, separator, raw = part.partition("=")
+        if not separator:
+            raise ValueError(f"--weights 的格式应为 key=value，收到 {part!r}")
+        field = _WEIGHT_FIELDS.get(key.strip().lower())
+        if field is None:
+            allowed = ", ".join(sorted(_WEIGHT_FIELDS))
+            raise ValueError(f"未知的权重名 {key.strip()!r}，可用: {allowed}")
+        try:
+            updates[field] = float(raw)
+        except ValueError:
+            raise ValueError(f"权重 {key.strip()!r} 的值不是数字: {raw!r}") from None
+
+    if not updates:
+        raise ValueError("--weights 未指定任何权重")
+    return settings.model_copy(update=updates)
+
+
+def _report_path(result: MiningResult, output: str | None, output_dir: Path) -> Path | None:
+    """决定报告写到哪。返回 ``None`` 表示格式无法识别（已打印错误）。"""
+    if output:
+        path = Path(output)
+        if not path.suffix:
+            path = path.with_suffix(".html")
+        return path
+    return output_dir / f"{_safe_filename(result.keyword)}-机会卡片.html"
+
+
+def _safe_filename(name: str) -> str:
+    """把关键词变成安全的文件名片段。
+
+    关键词来自用户输入，可能含 ``/`` 或 ``..``。不处理的话会把报告写到意料之外
+    的路径上去（``-k "../../etc/x"``）。
+    """
+    cleaned = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", name).strip(" .")
+    return (cleaned or "report")[:60]
+
+
+def _write_report(result: MiningResult, output: str | None, output_dir: Path) -> None:
+    """把报告写到磁盘。按扩展名选渲染器。"""
+    path = _report_path(result, output, output_dir)
+    if path is None:
+        return
+
+    suffix = path.suffix.lower()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if suffix == ".md":
+            from xhs_pain_miner.render.markdown import render_markdown
+
+            text = render_markdown(result)
+        elif suffix in (".html", ".htm"):
+            from xhs_pain_miner.render.html import render_html
+
+            text = render_html(result)
+        else:
+            _fail(f"不支持的输出格式 {suffix!r}，请用 .html 或 .md", code=EXIT_CONFIG)
+            return
+        # 必须显式指定 utf-8：默认编码在 Windows 上会让中文报告变成乱码
+        path.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        _fail(f"无法写入报告 {path}: {exc}")
+        return
+
+    console.print(f"\n✅ 报告已导出: {_safe(str(path))}")
 
 
 # --------------------------------------------------------------------------- #

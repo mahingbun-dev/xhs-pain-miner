@@ -30,6 +30,7 @@ from xhs_pain_miner.llm.base import LLMError, Message
 from xhs_pain_miner.models import (
     CompetitorFinding,
     Evidence,
+    ImageInsight,
     MiningResult,
     OpportunityCard,
     PainCluster,
@@ -37,8 +38,10 @@ from xhs_pain_miner.models import (
     RawCorpus,
     RawNote,
     RunCost,
+    TextUnit,
+    VlmEstimate,
 )
-from xhs_pain_miner.pain_miner import PainMiner, PipelineNotAvailableError
+from xhs_pain_miner.pain_miner import PainMiner
 
 __all__ = [
     "CollectorBackend",
@@ -46,18 +49,20 @@ __all__ = [
     "CompetitorFinding",
     "Evidence",
     "FixtureBackend",
+    "ImageInsight",
     "LLMError",
     "Message",
     "MiningResult",
     "OpportunityCard",
     "PainCluster",
     "PainMiner",
-    "PipelineNotAvailableError",
     "RawComment",
     "RawCorpus",
     "RawNote",
     "RunCost",
     "Settings",
+    "TextUnit",
+    "VlmEstimate",
     "__version__",
     "load_settings",
 ]

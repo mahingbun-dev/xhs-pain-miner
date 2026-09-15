@@ -175,6 +175,107 @@ class RawCorpus:
 
 
 # --------------------------------------------------------------------------- #
+# 流水线内部模型
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(slots=True)
+class TextUnit:
+    """流水线内部的一条待分析文本 —— 清洗后的最小分析单位。
+
+    笔记正文与评论被拆成同一种结构，因此向量化、聚类、标注三个阶段都不必区分
+    来源，只在证据权重与渲染时区分。
+    """
+
+    text: str
+    source: SourceKind
+    likes: int = 0
+    weight: float = 1.0
+    """证据权重，值域 ``(0, 1]``。
+
+    由点赞数经 log 压缩后归一得到。不能直接用原始点赞数：热门笔记的点赞量会
+    碾压其它证据，让「痛点强度」因子退化成「哪篇笔记最火」。
+    """
+
+    note_id: str = ""
+    note_hash: str = ""
+    created_at: datetime | None = None
+    """该文本的发布时间（评论取评论时间，笔记取笔记发布时间）。
+
+    「增长趋势」因子完全依赖它：没有时间维度的机会分只能回答"现在有多少人在抱怨"，
+    回答不了"这个抱怨是在变多还是变少" —— 而后者才是决定该不该现在进场的关键。
+    ``None`` 表示该条没有时间信息，计算趋势时应按中性处理而不是当作很早。
+    """
+    images: list[str] = field(default_factory=list)
+    """所属笔记的图片地址（仅 ``source == "note"`` 时非空）。"""
+
+    from_image: bool = False
+    """该单元是否由 VLM 图片分析派生。
+
+    视觉痛点（色号不符、包装难用、上脸效果与宣传图差距）常常无法从文字里得到 ——
+    这是多模态分析的核心价值所在。渲染时需区分标注，让用户知道这条证据来自图片，
+    而不是评论区。
+    """
+
+    truth_label: str = ""
+    """**仅供验收使用**：构造语料时为该文本设定的真实痛点标签。
+
+    只有内置 fixture 语料会填充它，生产路径（真实采集）恒为空字符串。
+    它的唯一用途是让「聚类准确率」「频次误差」这类验收指标可以**自动**计算，
+    而不必靠人工逐条数原文 —— 见 :mod:`xhs_pain_miner.pipeline.clean`。
+    """
+
+
+@dataclass(slots=True)
+class ImageInsight:
+    """一张图片的 VLM 分析结果。"""
+
+    url: str
+    image_hash: str = ""
+    note_id: str = ""
+    description: str = ""
+    pain_hints: list[str] = field(default_factory=list)
+    from_cache: bool = False
+    error: str = ""
+    """分析失败的原因。
+
+    VLM 失败**不阻塞**主流程（图片分析是增量信息，不是必需信息），但必须把
+    失败如实记录并在产物上标注 —— 静默缺失会让用户以为「这张图没有信息量」。
+    """
+
+
+@dataclass(slots=True)
+class VlmEstimate:
+    """VLM 成本预估 —— 在真正花钱之前先告诉用户要花多少。"""
+
+    total_images: int = 0
+    unique_images: int = 0
+    """去重后的图片数（同款商品图跨笔记大量重复，这是最有效的省钱手段）。"""
+
+    cached_images: int = 0
+    """命中本地缓存的图片数，这些不会产生调用。"""
+
+    planned_calls: int = 0
+    """实际计划发起的调用数 = unique - cached，再受 ``max_vlm_calls`` 截断。"""
+
+    truncated: bool = False
+    """是否因 ``max_vlm_calls`` 而被截断。截断时必须提示用户，否则会误以为
+    看到的是全量分析结果。"""
+
+    def summary(self) -> str:
+        """返回一行人类可读的预估说明。"""
+        parts = [
+            f"图片 {self.total_images} 张",
+            f"去重后 {self.unique_images} 张",
+            f"缓存命中 {self.cached_images} 张",
+            f"预计调用 {self.planned_calls} 次",
+        ]
+        if self.truncated:
+            parts.append("（已按 max_vlm_calls 截断）")
+        return " / ".join(parts)
+
+
+# --------------------------------------------------------------------------- #
 # 分析层模型
 # --------------------------------------------------------------------------- #
 
@@ -191,6 +292,13 @@ class Evidence:
     source: SourceKind
     likes: int = 0
     note_hash: str = ""
+    created_at: datetime | None = None
+    """该证据的发布时间（评论取评论时间，笔记取笔记发布时间）。
+
+    「增长趋势」因子的主依据。缺了它，趋势就只能靠 LLM 的 ``stage`` 判断，
+    而模型对趋势的判断容易过度自信 —— 时间戳是硬数据，不该被模型的措辞取代。
+    ``None`` 表示该条没有时间信息，计算趋势时按中性处理，**不要**当作"很早"。
+    """
 
     def to_public_dict(self) -> dict[str, Any]:
         """导出为可公开的摘要（不含原文）。
@@ -221,6 +329,21 @@ class PainCluster:
     stage: InsightStage = "stable"
     is_noise: bool = False
 
+    difficulty: int | None = None
+    """实现难度，1（几天可做）到 5（需要长期资源投入）。由标注阶段写回。
+
+    放在 ``PainCluster`` 上而不只存在于
+    :class:`~xhs_pain_miner.pipeline.label.ClusterLabel`，是因为评分与渲染都要
+    用它 —— 让下游去别处捞一个**已经算出来**的值，是耦合的开始，也是漏接的开始。
+
+    ``None`` 表示**不知道**（标注没跑、或该簇标注失败降级了），这与"难度中等"
+    是两回事：若给它一个默认值 3，两种情况会在「实现难度」因子上拿到同一个
+    分数，而前者本该按中性值处理 —— 一个静默的评分错误。
+    """
+
+    feasibility: str = ""
+    """难度的人话描述（如"个人可做 / 1-2 周"）。同上，由标注阶段写回。"""
+
     def to_public_dict(self) -> dict[str, Any]:
         """导出为可公开的结论（不含任何原文）。"""
         return {
@@ -232,6 +355,8 @@ class PainCluster:
             "category": self.category,
             "stage": self.stage,
             "is_noise": self.is_noise,
+            "difficulty": self.difficulty,
+            "feasibility": self.feasibility,
             "evidence_count": len(self.evidences),
         }
 
@@ -294,6 +419,18 @@ class OpportunityCard:
     score: float = 0.0
     score_breakdown: dict[str, float] = field(default_factory=dict)
     feasibility: str = ""
+
+    research_failed: bool = False
+    """这个簇的竞品调研是否**失败**（网络/限流），而不是"查证过没有竞品"。
+
+    两者的含义完全相反：前者是"不知道"，后者是机会分里最强的正面信号。
+    ``competitor_gap`` 因子已经按这个区分给分（失败 → 中性 0.5），但渲染层
+    只看得到分数，只能靠"没有竞品 **且** 空白度恰好为 0.5"反推 —— 那是一条
+    隐式耦合：评分侧哪天在别处也返回中性值，报告就会把"有竞品但没查到"
+    说成"调研未完成"。
+
+    显式记下来，反推就不必了。
+    """
 
     @property
     def has_active_competitor(self) -> bool:
@@ -367,6 +504,14 @@ class MiningResult:
     cost: RunCost = field(default_factory=RunCost)
     notes: list[str] = field(default_factory=list)
     """运行过程中的提示 / 降级警告（如"VLM 分析缺失"）。"""
+
+    weights: dict[str, float] = field(default_factory=dict)
+    """本次运行**实际生效**的因子权重（已归一化）。
+
+    卡片只保存因子得分与总分、不保存权重。若运行结果也不带权重，报告里就没有
+    任何地方能说明"这次是按什么权重算的" —— 用户调了权重却在自己的产物上
+    看不到自己调了什么，"权重可调"这个卖点就等于不可见。
+    """
 
     @property
     def top_cards(self) -> list[OpportunityCard]:

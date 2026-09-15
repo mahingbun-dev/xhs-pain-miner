@@ -24,8 +24,17 @@ Status = Literal["ok", "warn", "fail"]
 MIN_PYTHON = (3, 10)
 
 CORE_MODULES = ("click", "pydantic", "pydantic_settings", "openai", "anthropic", "rich")
-ANALYSIS_MODULES = ("numpy", "sklearn", "sentence_transformers")
+ANALYSIS_MODULES = ("numpy", "sklearn")
+"""M1 核心链路（向量化 + 聚类）的必需依赖。
+
+缺了它们 ``mine`` 完全跑不起来，因此缺失状态是 **fail**（``doctor`` 以退出码 2
+结束）而不是 M0 时的 ``warn`` —— 那时还没有分析链路，它们是纯粹的可选功能。
+
+``sentence_transformers`` **不在**这里：它只影响 ``EMBEDDING_PROVIDER=local``，
+改用 ``api`` 即可绕开，所以单独在 :func:`_check_embedding` 里判断。
+"""
 VLM_MODULES = ("PIL",)
+"""``--deep``（图片分析）需要的依赖。缺了只影响图片分析，因此是 ``warn``。"""
 
 
 @dataclass(slots=True)
@@ -66,17 +75,29 @@ def _check_python() -> Check:
     )
 
 
-def _check_modules(name: str, modules: tuple[str, ...], *, optional: str) -> Check:
-    """检查一组依赖是否安装。"""
+def _check_modules(
+    name: str,
+    modules: tuple[str, ...],
+    *,
+    optional: str,
+    blocking: bool = False,
+) -> Check:
+    """检查一组依赖是否安装。
+
+    Args:
+        name: 检查项名称。
+        modules: 需要的模块名。
+        optional: 对应的 extra 名，用于生成安装命令。
+        blocking: 缺失是否阻塞运行。``True`` → ``fail``，``False`` → ``warn``。
+    """
     missing = [m for m in modules if not _has_module(m)]
     if not missing:
         return Check(name, "ok", f"{len(modules)} 个依赖均已安装")
-    return Check(
-        name,
-        "warn",
-        f"缺少: {', '.join(missing)}",
-        hint=f'pip install -e ".[{optional}]"',
-    )
+    status: Status = "fail" if blocking else "warn"
+    detail = f"缺少: {', '.join(missing)}"
+    if blocking:
+        detail += "（缺失时 `mine` 无法运行）"
+    return Check(name, status, detail, hint=f'pip install -e ".[{optional}]"')
 
 
 def _check_llm(settings: Settings) -> Check:
@@ -240,7 +261,7 @@ def run_diagnostics(settings: Settings) -> list[Check]:
     return [
         _check_python(),
         _check_modules("核心依赖", CORE_MODULES, optional="dev"),
-        _check_modules("分析依赖", ANALYSIS_MODULES, optional="analysis"),
+        _check_modules("分析依赖", ANALYSIS_MODULES, optional="analysis", blocking=True),
         _check_modules("图片依赖", VLM_MODULES, optional="vlm"),
         _check_llm(settings),
         _check_vlm(settings),
