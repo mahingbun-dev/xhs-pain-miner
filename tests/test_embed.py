@@ -440,19 +440,22 @@ class TestApiEmbedder:
         embedder.close()
         assert embedder._client is None
 
-    def test_protocol_isinstance_raises_before_first_encode(self):
-        """守卫「惰性维度」这个设计，同时把它的代价钉在测试里。
+    def test_dimension_raises_before_first_encode(self):
+        """守卫「惰性维度」这个设计：首次编码前读 dimension 必须抛错。
 
-        ``Embedder`` 是 ``runtime_checkable`` 协议，而 ``isinstance`` 会逐个读取
-        协议成员 —— 读到 ``dimension`` 时就会触发下面这个 ``RuntimeError``。
-        也就是说：**首次编码前不能用 isinstance 做分派**，要用 ``is_local`` / ``name``。
+        **为什么不去测 ``isinstance(x, Embedder)``。** 那条路依赖 CPython 对
+        ``runtime_checkable`` 协议的实现细节 —— 3.12 起对**数据成员**的检查
+        不再逐个读取，同一个表达式在 3.10/3.11 抛 ``RuntimeError``、在 3.12
+        却正常返回。把测试建在这种行为上，等于把测试绑死在解释器版本上
+        （CI 上就是这么红起来的）。
 
-        这条测试的另一半价值是防止有人"顺手把 dimension 改成主动加载模型"：
-        那会让一次属性读取变成 100MB 下载，这里会立刻变红。
+        真正稳定、也真正重要的契约是下面这条：读 ``dimension`` 本身就该失败，
+        因为它意味着要在一次属性访问里下载约 100MB 的模型权重。
+        分派请用 ``is_local`` / ``name``，不要用 ``isinstance``。
         """
         embedder = make_api_embedder(ok_response({"a": [1.0, 0.0]}))
         with pytest.raises(RuntimeError, match="首次 encode"):
-            isinstance(embedder, Embedder)
+            _ = embedder.dimension
 
         # 其余成员在首次调用前就是可用的
         assert embedder.name == "api"
