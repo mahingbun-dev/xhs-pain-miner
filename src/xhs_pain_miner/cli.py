@@ -185,6 +185,18 @@ def mine(
         _fail(f"无法创建输出目录: {exc}")
         return
 
+    # 快速失败：缺 API Key 是最常见的配置错误。不在这里拦住的话，用户会先看到
+    # 「采集完成」的进度，跑完一遍采集才被告知缺 Key —— 白等一场，还会误以为
+    # 采集环节有问题。依赖缺失同理，但它们由 mine() 内部按需报出（错误信息更具体）。
+    if not settings.llm_api_key:
+        _fail(
+            "未配置 LLM API Key。请在 .env 或环境变量中设置 LLM_API_KEY"
+            "（也兼容 DEEPSEEK_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY）。\n"
+            "  可先执行 `xhs-pain-miner doctor` 检查完整配置。",
+            code=EXIT_CONFIG,
+        )
+        return
+
     miner = PainMiner(settings=settings)
     try:
         # 采集放在 mine() 之外，是为了让「成本确认」发生在**任何 LLM 调用之前**，

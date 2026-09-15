@@ -334,13 +334,18 @@ class TestMineCommand:
     """
 
     def test_missing_api_key_gives_readable_error(self, runner: CliRunner):
-        """没有 API Key 时必须给出可操作的提示，而不是裸 traceback。"""
+        """没有 API Key 时必须**立刻**给出可操作的提示。
+
+        必须是快速失败：先跑一遍采集再报缺 Key，用户会白等一场，还会误以为
+        是采集环节出了问题。
+        """
         result = runner.invoke(main, ["mine", "-k", "防晒霜", "--backend", "fixture", "-n", "5"])
 
-        assert result.exit_code != 0, _combined(result)
+        assert result.exit_code == 2, _combined(result)
         output = _combined(result)
-        assert "API Key" in output or "LLM" in output
+        assert "API Key" in output
         assert "Traceback" not in output
+        assert "采集完成" not in output, "缺 API Key 时不该先跑完采集"
 
     def test_rejects_unknown_weight_name(self, runner: CliRunner):
         """★ 拼错的权重名必须报错 —— 静默忽略会让用户以为调整生效了。"""

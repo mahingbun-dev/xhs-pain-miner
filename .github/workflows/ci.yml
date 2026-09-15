@@ -17,8 +17,9 @@ jobs:
       # 从 pyproject 的 [dev] extra 取 ruff，而不是裸 `pip install ruff`：
       # ruff 的次版本会调整格式规则，版本漂移会让 format --check 在无关 PR 上无故变红。
       - run: pip install -e ".[dev]"
-      - run: ruff check src/ tests/
-      - run: ruff format --check src/ tests/
+      # tools/ 也要检查：M1 新增的评估与联调脚本同样会被维护，不该成为 lint 盲区。
+      - run: ruff check src/ tests/ tools/
+      - run: ruff format --check src/ tests/ tools/
 
   test:
     runs-on: ubuntu-latest
@@ -30,8 +31,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      # 测试全部离线运行，不依赖网络、API Key 或分析依赖（numpy/scikit-learn）
-      - run: pip install -e ".[dev]"
+      # 必须装 analysis + vlm：M1 起向量化与归集是**核心链路**，缺了它们
+      # `mine` 完全跑不起来。测试本身仍不联网、不需要 API Key（用注入的假
+      # LLM / 假编码器），但需要这些库能被 import。
+      - run: pip install -e ".[analysis,vlm,dev]"
       - run: pytest --cov=src --cov-report=xml
       - uses: codecov/codecov-action@v3
         if: matrix.python-version == '3.10'
@@ -53,11 +56,17 @@ jobs:
         run: |
           xhs-pain-miner --version
           xhs-pain-miner --help
+      # 必须用 heredoc 而不是 `python -c "` 跟多行缩进：YAML 会把那样的多行
+      # 标量**折叠成一行**（换行变空格），Python 收到 " from ... import ..." 后
+      # 直接 IndentationError —— 这个 job 因此从加入起就没真正跑通过。
       - name: 验证内置样例数据随包分发
-        run: python -c "
+        run: |
+          python - <<'PY'
           from xhs_pain_miner.collectors.fixture import FixtureBackend
-          corpus = FixtureBackend().collect('防晒霜', limit=999, max_comments_per_note=999)
-          assert corpus.notes, '内置样例数据为空'
-          assert corpus.comments, '内置样例评论为空'
-          print('fixture ok:', corpus.summary())
-          "
+
+          corpus = FixtureBackend().collect("防晒霜", limit=999, max_comments_per_note=999)
+          assert corpus.notes, "内置样例数据为空"
+          assert corpus.comments, "内置样例评论为空"
+          assert corpus.total_images, "内置样例图片为空"
+          print("fixture ok:", corpus.summary())
+          PY
