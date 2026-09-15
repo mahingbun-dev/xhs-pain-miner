@@ -23,11 +23,13 @@ build/
 .env.local
 
 # Data
+# 注意：这里必须用根锚定的 /data/，否则会连带忽略
+# src/xhs_pain_miner/data/ 下的内置样例语料，导致它无法提交。
 *.db
 *.sqlite
-data/
-output/
-reports/
+/data/
+/output/
+/reports/
 
 # OS
 .DS_Store
@@ -36,3 +38,9 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# 测试与覆盖率产物
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml

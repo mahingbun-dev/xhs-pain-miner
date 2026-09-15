@@ -14,7 +14,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-      - run: pip install ruff
+      # 从 pyproject 的 [dev] extra 取 ruff，而不是裸 `pip install ruff`：
+      # ruff 的次版本会调整格式规则，版本漂移会让 format --check 在无关 PR 上无故变红。
+      - run: pip install -e ".[dev]"
       - run: ruff check src/ tests/
       - run: ruff format --check src/ tests/
 
@@ -28,7 +30,34 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      # 测试全部离线运行，不依赖网络、API Key 或分析依赖（numpy/scikit-learn）
       - run: pip install -e ".[dev]"
       - run: pytest --cov=src --cov-report=xml
       - uses: codecov/codecov-action@v3
         if: matrix.python-version == '3.10'
+
+  # 打包回归防护：M0 之前 build-backend 是无效值且缺少 package-dir，
+  # 导致 "pip install -e" 装不出可导入的包 —— 这个 job 防止该问题复发。
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: 安装并验证包可导入
+        run: |
+          pip install -e ".[dev]"
+          python -c "import xhs_pain_miner; print('version:', xhs_pain_miner.__version__)"
+      - name: 验证 CLI 入口可用
+        run: |
+          xhs-pain-miner --version
+          xhs-pain-miner --help
+      - name: 验证内置样例数据随包分发
+        run: python -c "
+          from xhs_pain_miner.collectors.fixture import FixtureBackend
+          corpus = FixtureBackend().collect('防晒霜', limit=999, max_comments_per_note=999)
+          assert corpus.notes, '内置样例数据为空'
+          assert corpus.comments, '内置样例评论为空'
+          print('fixture ok:', corpus.summary())
+          "

@@ -1,273 +1,301 @@
 <div align="center">
 
-# 🔍 XHS Pain Miner — 小红书用户痛点挖掘工具
+# 🔍 XHS Pain Miner
 
-**AI-Powered Xiaohongshu User Pain Point Discovery & Analysis Platform**
+**从用户痛点中发现可做的产品机会**
+
+*Turn real user pain points from Xiaohongshu (小红书 / RedNote) into buildable product opportunities.*
 
 [![GitHub Stars](https://img.shields.io/github/stars/mahingbun-dev/xhs-pain-miner?style=social&label=Stars)](https://github.com/mahingbun-dev/xhs-pain-miner)
 [![GitHub Forks](https://img.shields.io/github/forks/mahingbun-dev/xhs-pain-miner?style=social&label=Forks)](https://github.com/mahingbun-dev/xhs-pain-miner)
 [![GitHub Issues](https://img.shields.io/github/issues/mahingbun-dev/xhs-pain-miner)](https://github.com/mahingbun-dev/xhs-pain-miner/issues)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-Welcome-brightgreen.svg)](https://github.com/mahingbun-dev/xhs-pain-miner/pulls)
-
-**从海量小红书笔记和评论中，用 AI 自动发现用户真实痛点和未被满足的需求**
-
-[快速开始](#-快速开始) · [功能特性](#-功能特性) · [截图演示](#-截图演示) · [技术架构](#-技术架构) · [贡献指南](#-贡献指南) · [路线图](#-路线图)
 
 </div>
 
 ---
 
-## 📌 这是什么？
+## 📌 这是什么
 
-> **XHS Pain Miner** 是一款开源的小红书（Xiaohongshu / RedNote）用户痛点挖掘工具。
-> 
-> 它通过 **多模态 AI 分析**（NLP + VLM 视觉语言模型），从笔记正文、图片和评论区中自动提炼用户的真实痛点、需求和期望，输出结构化的 **品类痛点地图**。
+**给正在想"下一个做什么"的独立开发者用的小红书机会发现工具。**
 
-### 🎯 解决什么问题？
+它从海量小红书笔记与评论中聚类出用户真实痛点，自动调研市面上已有的竞品工具，
+最后输出一张张带**机会分**的**机会卡片** —— 而不是又一份看不懂的数据看板。
 
-| 传统方式 | XHS Pain Miner |
+### 🆚 与数据平台的区别
+
+千瓜、新红、蝉小红这类工具做的是**检索**：配置关键词，命中，推送。
+本工具做的是**发现**：把散落在几千条评论里的抱怨归并成痛点，找到还没被做掉的那一个。
+
+| | 数据平台（千瓜/新红） | XHS Pain Miner |
+|---|---|---|
+| 输出 | 榜单、看板、流量数据 | 机会卡片（痛点 + 竞品空缺 + 机会分） |
+| 方法 | 关键词命中 + 正负面判定 | 向量聚类 + LLM 归纳 |
+| 定位 | 验证已有的投放决策 | 发现还不存在的产品方向 |
+| 门槛 | 需企业认证，¥168–3000/月 | 开源免费，本地运行 |
+| 你的数据 | 上传到对方服务器 | **不离开你的电脑** |
+
+> 详细竞品与合规分析见 [docs/competitive-analysis.md](docs/competitive-analysis.md)
+
+---
+
+## ⚠️ 当前状态
+
+**M0（骨架）已完成，M1（核心分析链路）开发中。**
+
+| 能力 | 状态 |
 |---|---|
-| 手动翻阅数百条笔记，凭感觉总结 | AI 自动采集+分析，3 分钟出报告 |
-| 只看高赞笔记，忽略真实声音 | 深入评论区，挖掘隐藏需求 |
-| 只能看文字，图片信息丢失 | VLM 多模态分析，理解图片内容 |
-| 主观判断，容易遗漏 | 结构化输出：频率排名+情感强度+趋势 |
-| 耗时 1-2 天 | 自动化完成，节省 90% 时间 |
+| `doctor` 环境诊断 | ✅ 可用 |
+| `collect` 采集（内置样例数据） | ✅ 可用 |
+| 三种 LLM 协议适配（chat / responses / messages） | ✅ 可用 |
+| 采集后端插件协议 | ✅ 可用 |
+| `mine` 完整分析（聚类 → 竞品调研 → 机会分 → 报告） | ⏳ M1 |
+| MCP 采集后端 | ⏳ M3 |
+| Claude Code / Codex Skill | ⏳ M4 |
 
-### 👥 谁需要它？
+README 中的功能描述与路线图严格对应上表，不提前宣称未实现的能力。
 
-- **产品经理** — 从用户声音中发现需求，指导产品规划
-- **品牌方 / 市场团队** — 了解用户对竞品的真实评价
-- **个人创业者** — 发现蓝海机会和选品方向
-- **用户研究员** — 替代传统问卷，获取真实反馈
-- **电商运营** — 分析用户对商品的痛点，优化卖点
+---
 
 ## 🚀 快速开始
 
-### 一键安装
+### 安装
 
 ```bash
-# 克隆仓库
 git clone https://github.com/mahingbun-dev/xhs-pain-miner.git
 cd xhs-pain-miner
-
-# 安装依赖
+python -m venv .venv && source .venv/bin/activate
 pip install -e ".[all]"
-
-# 配置 API Key
-cp .env.example .env
-# 编辑 .env 填入你的 OpenAI API Key
 ```
 
-### 5 分钟体验
-
-```python
-from xhs_pain_miner import PainMiner
-
-# 初始化
-miner = PainMiner(api_key="your-openai-key")
-
-# 分析一个品类的用户痛点
-report = miner.analyze(
-    keyword="防晒霜",          # 品类关键词
-    notes_count=200,            # 采集笔记数量
-    include_comments=True,      # 分析评论区
-    include_images=True,       # 分析图片内容
-)
-
-# 查看痛点地图
-report.print_pain_points()
-# 输出示例：
-# 🥇 假白搓泥 — 提及 89 次 | 情感: 负面 92% | 趋势: ↗️
-# 🥈 闷痘过敏 — 提及 76 次 | 情感: 负面 88% | 趋势: →
-# 🥉 不防水 — 提及 54 次  | 情感: 负面 78% | 趋势: ↘️
-
-# 导出可视化报告
-report.export_html("防晒霜_痛点地图.html")
-report.export_pdf("防晒霜_痛点地图.pdf")
-report.export_json("防晒霜_数据.json")
-```
-
-### 启动 Web 仪表盘
+### 先诊断环境
 
 ```bash
-# 启动交互式分析界面
-xhs-pain-miner serve --port 8080
-
-# 浏览器打开 http://localhost:8080
+xhs-pain-miner doctor
 ```
 
-## ✨ 功能特性
+`doctor` 会检查 Python 版本、依赖、LLM/VLM 配置、采集后端与路径权限，
+并给出可直接复制执行的修复建议。它**不发起任何网络请求**。
 
-### 🔍 智能采集
-- 关键词搜索笔记 + 自动翻页
-- 评论区深度采集（主评论 + 子评论）
-- 图片下载 + VLM 多模态分析
-- 采集频率控制，避免触发限制
+### 用内置样例数据跑一遍
 
-### 🧠 AI 深度分析
+不需要 API Key、不联网、不触碰任何平台：
 
-#### 📝 文本分析引擎
-- **情感分析** — 正面/负面/中性分类 + 强度评分
-- **关键词提取** — TF-IDF + 大模型双引擎
-- **话题聚类** — 自动发现用户讨论的核心话题
-- **需求分类** — 识别功能需求、情感需求、社交需求
-
-#### 🖼️ 图片分析引擎（VLM）
-- **内容识别** — 产品外观、使用场景、对比图
-- **排版结构** — 封面策略、图文比例、信息层级
-- **视觉痛点** — 从图片中发现用户展示的问题
-- **竞品识别** — 自动识别图中出现的品牌/产品
-
-#### 💬 评论区痛点挖掘
-- **用户声音提取** — 从评论中识别真实需求和抱怨
-- **痛点强度评分** — 结合情感+频率+互动数据
-- **购买决策因素** — 用户在意什么？犹豫什么？
-- **竞品对比洞察** — 用户如何评价不同品牌
-
-### 📊 可视化输出
-- **品类痛点地图** — Top 痛点 + 频率 + 情感 + 趋势
-- **情感热力图** — 话题 × 时间的负面情绪分布
-- **词云图** — 高频关键词可视化
-- **趋势折线图** — 痛点随时间变化
-- **多品类对比** — 横向对比不同品类痛点差异
-
-### 🌐 Web 仪表盘
-- 交互式图表（hover 查看详情）
-- 品类切换 + 时间范围筛选
-- 一键导出 PDF / 图片 / JSON
-- 响应式设计，支持移动端
-
-### 🤖 Codex / Claude Code Skill
-- 自然语言驱动：`分析防晒霜的用户痛点`
-- 集成到 AI Agent 工作流
-- 支持定时分析任务
-
-## 📸 截图演示
-
-> 💡 贡献截图可获得 Contributor 标签！
-
-```
-<!-- Phase 1 完成后补充截图 -->
-[痛点地图 - 待补充]
-[Web 仪表盘 - 待补充]
-[终端输出示例 - 待补充]
+```bash
+xhs-pain-miner collect -k 防晒霜 --backend fixture
 ```
 
-## 🏗️ 技术架构
+你会看到内置的脱敏样例语料被采集并按限额裁剪：
 
 ```
-┌─────────────────────────────────────────────────┐
-│                   用户交互层                      │
-│  ┌──────────┐  ┌──────────┐  ┌──────────────┐  │
-│  │ Codex    │  │ Web      │  │ CLI / API    │  │
-│  │ Skill    │  │ Dashboard│  │              │  │
-│  └────┬─────┘  └────┬─────┘  └──────┬───────┘  │
-├───────┼──────────────┼───────────────┼──────────┤
-│       │         分析引擎层           │          │
-│  ┌────▼──────────────▼───────────────▼──────┐  │
-│  │              PainMiner Core              │  │
-│  │  ┌─────────┐ ┌─────────┐ ┌──────────┐  │  │
-│  │  │ NLP     │ │ VLM     │ │ Pain     │  │  │
-│  │  │ 分析    │ │ 视觉分析 │ │ 挖掘算法  │  │  │
-│  │  └─────────┘ └─────────┘ └──────────┘  │  │
-│  └──────────────────┬──────────────────────┘  │
-├─────────────────────┼──────────────────────────┤
-│               数据采集层                         │
-│  ┌──────────────────▼──────────────────────┐  │
-│  │         数据采集引擎 (MediaCrawler / MCP) │  │
-│  └─────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────┘
+✅ 采集完成：「防晒霜」 12 篇笔记 / 65 条评论 / 18 张图片 (来源: fixture)
 ```
 
-### 技术栈
+### 配置模型
 
-| 层级 | 技术 | 说明 |
+```bash
+cp .env.example .env
+```
+
+最小配置（默认使用 DeepSeek，成本约为 GPT-4o 的 1/20）：
+
+```bash
+LLM_API_KEY=sk-your-key-here
+```
+
+也可以用任意 OpenAI 兼容服务：
+
+```bash
+LLM_PROTOCOL=chat
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_MODEL=gpt-4o-mini
+```
+
+或 Anthropic：
+
+```bash
+LLM_PROTOCOL=messages
+LLM_MODEL=claude-sonnet-5
+LLM_API_KEY=sk-ant-xxx
+```
+
+### 分析一个品类
+
+```bash
+xhs-pain-miner mine -k 防晒霜 -n 200
+```
+
+> ⏳ M1 里程碑实现中。当前会给出明确提示，并建议先用 `collect` 验证采集层。
+
+---
+
+## 🎴 机会卡片
+
+核心交付物长这样：
+
+```
+┌─ 机会 #037：小红书图文导出工具 ─────────┐
+│ ⭐ 机会分 78/100                       │
+│                                        │
+│ 😣 痛点（证据 42 条）                  │
+│   "存了几百篇笔记，想整理成攻略，      │
+│    只能一篇篇截屏"                     │
+│   → 点开看 3 条原文引用（证据链）      │
+│                                        │
+│ 🔧 竞品调研                            │
+│   • 剪藏插件（不支持小红书）           │
+│   • GitHub: xxx 128⭐ 最后提交 2023    │
+│   → 结论：无活跃竞品，存在空缺         │
+│                                        │
+│ 💰 可行性：个人可做 / 1-2 周            │
+└────────────────────────────────────────┘
+```
+
+**三个关键设计：**
+
+- **证据链** —— 每条结论都能点回原文。这是对"ChatGPT 免费也能摘要"的正面防守：
+  纯摘要没人付费，**能点回原文、能重跑出趋势的报告**才有人付费。
+- **提及次数是算出来的** —— 由聚类簇大小得出，不是 LLM 生成的。
+  逐条 LLM 抽取再归并会让频次失真（同一痛点被命名为"导入麻烦"/"导入不便"就丢失了统计意义）。
+- **竞品调研** —— 自动去 GitHub / 应用商店 / 小红书站内查"这个方向是不是已经被人做掉了"。
+
+### 机会分
+
+可解释、可调权重、每个因子可展开溯源：
+
+```
+机会分 = 100 × (
+    0.25 × 痛点强度     # 情感极性 × 强度
+  + 0.20 × 提及量       # log 归一，兼作置信度
+  + 0.20 × 增长趋势     # 时间序列
+  + 0.25 × 竞品空白度   # GitHub / 应用商店 / 站内调研
+  + 0.10 × 实现难度⁻¹   # LLM 评估
+)
+```
+
+---
+
+## 🔌 采集后端
+
+**本仓库不携带任何平台采集代码**，原因写在 [docs/collector-plugin.md](docs/collector-plugin.md)：
+第三方采集器的许可证通常不允许商业使用或再分发，把它放进来会让项目从内部违反上游许可。
+
+| 后端 | 说明 | 状态 |
 |---|---|---|
-| 前端 | Next.js 14 + Tailwind CSS + Recharts | 交互式仪表盘 |
-| 分析引擎 | Python 3.10+ + LangChain | NLP + VLM 分析 |
-| 视觉分析 | OpenAI GPT-4o / Claude 3.5 | 多模态图片理解 |
-| 数据采集 | MediaCrawler / xiaohongshu-mcp | 小红书数据获取 |
-| 数据存储 | SQLite（本地）/ PostgreSQL（部署） | 分析结果持久化 |
-| Skill | Codex / Claude Code Skill | AI Agent 集成 |
+| `fixture` | 内置脱敏样例数据，用于 CI / Demo / 离线验证 | ✅ 默认 |
+| `plugin` | 加载**你本机自备**的采集器 | ✅ |
+| `mcp` | 对接 [xiaohongshu-mcp](https://github.com/xpzouying/xiaohongshu-mcp)（Apache-2.0） | ⏳ M3 |
+
+写一个自己的后端只要两步：
+
+```bash
+cp src/xhs_pain_miner/collectors/example_backend.py ~/my_xhs_backend.py
+export XHS_COLLECTOR_PLUGIN=~/my_xhs_backend.py
+xhs-pain-miner collect -k 防晒霜 --backend plugin
+```
+
+模板内含完整的字段映射表与合规红线说明。
+
+---
+
+## 🔒 合规与隐私
+
+本项目在一个有真实判例约束的环境里做产品，所以设计上有几条硬约束：
+
+- **本地运行、数据不上传** —— 采集与分析都在你的机器上，API Key 也是你自己的。
+  这躲开了"向公众提供数据"与"实质性替代"这两个判例要件。
+- **只交付结论，不交付数据** —— 判例打击的是"提供数据"，不是"分析出结论"。
+- **个人信息最小化** —— UID / 昵称 / 头像一律哈希，源码里没有采集它们的代码路径。
+- **众包默认关闭** —— 若你主动开启结果共享，上传的是脱敏结论（品类、痛点簇统计、机会分）。
+  原文与个人信息在**结构上**不会进入上传载荷，这一点有守卫测试兜底
+  （`tests/test_models.py::test_public_dict_never_leaks_raw_text`）。
+
+  > ⚠️ 已知边界：LLM 生成的摘要文本（痛点标签、一句话总结）本质是自由文本，
+  > 模型在总结时引用原话是常见行为。M4 实现众包上传时会对这些字段加一道
+  > **原文回抄检测**（`find_verbatim_overlap`）才允许出网 —— 在那之前众包功能不会上线。
+- **不实现签名逆向、不提供 IP 池/账号池** —— 这是《反不正当竞争法》2025 修订第 13 条第 3 款
+  的构成要件，也是蝉小红被判赔 490 万的直接原因。
+
+> **免责声明**：小红书 `robots.txt` 为 `Disallow: /`，平台明确拒绝第三方抓取。
+> 使用本工具采集数据可能违反平台服务条款，导致账号被限制。
+> 请自行评估风险，仅将本工具用于已获授权的场景。
+
+---
 
 ## 🗺️ 路线图
 
-### Phase 1 — MVP（当前）🔍
-- [ ] 数据采集模块
-- [ ] 文本分析引擎（情感分析 + 关键词 + 聚类）
-- [ ] VLM 图片分析引擎
-- [ ] 痛点挖掘算法
-- [ ] 可视化报告生成
-- [ ] Web 仪表盘
-- [ ] Codex Skill 封装
-- [ ] 开源文档 + CI/CD
+### M0 · 骨架 ✅
+- [x] 修复打包配置、统一包结构
+- [x] AGPL-3.0 + MIT 双许可
+- [x] 配置层（LLM / VLM / Embedding / Collector / 隐私）
+- [x] LLM 三协议适配（chat / responses / messages）
+- [x] 采集后端协议 + 插件加载器 + 内置样例数据
+- [x] `doctor` 环境诊断
 
-### Phase 2 — 稳定化 🚀
-- [ ] DSH 插件集成（定时任务）
-- [ ] 数据持久化 + 历史对比
-- [ ] 痛点突变告警
-- [ ] API 接口开放
-- [ ] 多平台支持（抖音/知乎）
-- [ ] 本地 VLM 模型（降成本）
+### M1 · 核心链路 ⏳
+- [ ] 清洗与去重
+- [ ] embedding + HDBSCAN 聚类
+- [ ] LLM 簇命名与证据抽取
+- [ ] GitHub 竞品调研
+- [ ] 多因子机会分
+- [ ] 单文件 HTML 机会卡片
+- [ ] VLM 图片分析（`--deep`）+ 成本控制
+- **验收**：端到端跑通 · 人工盲评 20 张卡片「有用率 ≥ 60%」· 频次抽查误差 < 15% · VLM 成本实测报告
 
-### Phase 3 — 产品化 🎯
-- [ ] 桌面端 / 移动端 App
-- [ ] 团队协作功能
-- [ ] 自定义分析模板
-- [ ] 商业化收费体系
-- [ ] 更多分析维度（竞品跟踪、KOL 画像）
+### M2 · 竞品调研补全 ⏳
+- [ ] App Store / Chrome 商店检索
+- [ ] 小红书站内已有工具检索
 
-## 📊 竞品对比
+### M3 · 真实采集 ⏳
+- [ ] `CollectorBackend` 插件协议落地文档
+- [ ] MCP 后端（xiaohongshu-mcp）
+- [ ] 限速、断点续跑
+- **验收**：真实后端跑通一个品类 · **代码审计：仓库不含任何受限代码**
 
-| 能力 | XHS Pain Miner | 千瓜数据 | MediaCrawler | 舆情分析工具 |
-|---|---|---|---|---|
-| 小红书深度分析 | ✅ 核心能力 | ⚠️ 偏投放 | ❌ 纯采集 | ⚠️ 通用型 |
-| 评论区痛点挖掘 | ✅ AI 驱动 | ❌ | ❌ | ⚠️ 关键词匹配 |
-| 图片内容理解（VLM） | ✅ | ❌ | ❌ | ❌ |
-| 品类痛点地图 | ✅ | ❌ | ❌ | ❌ |
-| 趋势追踪 | ✅ | ⚠️ 付费 | ❌ | ⚠️ |
-| 可视化仪表盘 | ✅ | ⚠️ 付费 | ❌ | ⚠️ |
-| 开源免费 | ✅ | ❌ | ✅ | 部分 |
-| AI Agent 集成 | ✅ Skill | ❌ | ❌ | ❌ |
+### M4 · 商业化地基 ⏳
+- [ ] Claude Code / Codex Skill 封装
+- [ ] SQLite 持久化与结果缓存
+- [ ] 云端「机会雷达周报」（社区众包脱敏结论）
+- **验收**：Skill 可在 Claude Code 中真实触发 · 上传 payload 审计通过
 
-## 🤝 贡献指南
+---
 
-我们欢迎各种形式的贡献！
+## 🤝 贡献
 
-- 🐛 提交 Bug Report（[Issue 模板](https://github.com/mahingbun-dev/xhs-pain-miner/issues/new?template=bug_report.md)）
-- 💡 提出新功能建议（[Feature Request](https://github.com/mahingbun-dev/xhs-pain-miner/issues/new?template=feature_request.md)）
-- 📝 改进文档
+欢迎各种形式的贡献 —— 但请先读这两条：
+
+1. **不要提交任何来源可疑的采集代码**。见 [docs/collector-plugin.md](docs/collector-plugin.md)。
+2. **不要新增任何携带原文或个人信息的导出字段**。
+   `tests/test_models.py::test_public_dict_never_leaks_raw_text` 是这条底线的守卫测试。
+
+- 🐛 [提交 Bug Report](https://github.com/mahingbun-dev/xhs-pain-miner/issues/new?template=bug_report.md)
+- 💡 [提出新功能建议](https://github.com/mahingbun-dev/xhs-pain-miner/issues/new?template=feature_request.md)
 - 🧪 补充测试用例
-- 📸 提交截图 / 演示视频
-- ⭐ Star 本项目支持开发
+- 📸 提交机会卡片的实际效果截图
+- ⭐ Star 本项目
 
 详见 [CONTRIBUTING.md](CONTRIBUTING.md)
 
+---
+
 ## 📄 License
 
-[MIT License](LICENSE) — 自由使用，欢迎商用
+本项目采用**双许可**：
 
-## 🙏 致谢
+| 范围 | 许可 |
+|---|---|
+| `src/` 核心引擎 | **AGPL-3.0-or-later**（见 [LICENSE](LICENSE)） |
+| `skill/`、`docs/`、`examples/` | **MIT**（见 [LICENSE-MIT](LICENSE-MIT)） |
 
-- [MediaCrawler](https://github.com/NanmiCoder/MediaCrawler) — 多平台数据采集基础设施
-- [xiaohongshu-mcp](https://github.com/xpzouying/xiaohongshu-mcp) — 小红书 MCP 协议
-- [LangChain](https://github.com/langchain-ai/langchain) — LLM 编排框架
-- [Recharts](https://github.com/recharts/recharts) — React 图表库
-
-## 📬 联系方式
-
-- 💬 Discussions: [GitHub Discussions](https://github.com/mahingbun-dev/xhs-pain-miner/discussions)
-- 🐦 Twitter: [@mahingbun-dev](https://twitter.com/mahingbun-dev)
-- 📧 Email: 332590574@qq.com
+简单说：**你可以自由使用、修改、自部署**；但如果你把它改造成对外的网络服务，
+需要按 AGPL 开源你的修改。本地跑 CLI 不触发这一条。
 
 ---
 
 <div align="center">
 
 **如果这个项目对你有帮助，请给个 ⭐ Star 支持一下！**
-
-Made with ❤️ by the community
 
 </div>
