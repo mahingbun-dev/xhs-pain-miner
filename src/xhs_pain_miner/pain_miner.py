@@ -430,7 +430,15 @@ class PainMiner:
             messages.append(
                 "竞品调研已关闭，「竞品空白度」因子按中性值 0.5 计算 —— 未调研不等于没有竞品。"
             )
-            return findings, failed
+            # ★ 关闭调研时必须把**所有**非噪声簇标记为「没查成」。
+            #
+            # 不标记的话，`competitor_gap` 会把空 findings 解读成「查证过，确实
+            # 没有竞品」并返回 1.0 —— 那是机会分里最强的正面信号（比"全部停更"
+            # 的 0.75 还高），而我们一次都没查。每张卡片会因此虚高 12.5 分，
+            # 报告上还会印出"✅ 未发现竞品 —— 查证过，目前没有可查到的成熟实现"。
+            #
+            # 这正是不变式 3 点名的那个危险实例：把"没查成"当成"没有"。
+            return findings, {c.id for c in clusters if not c.is_noise}
 
         named = [c for c in clusters if not c.is_noise]
         candidates = named[: self.settings.research_max_clusters]
@@ -440,6 +448,8 @@ class PainMiner:
                 f"（共 {len(named)} 个），其余簇的空白度按中性值计算。"
                 f"配置 GITHUB_TOKEN 可提高调用配额，或调大 RESEARCH_MAX_CLUSTERS。"
             )
+            # 超出上限的簇同样**没查过**，必须一并标记 —— 与关闭调研同理。
+            failed.update(c.id for c in named[self.settings.research_max_clusters :])
 
         for item in candidates:
             items, warning = research_cluster(

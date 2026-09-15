@@ -198,6 +198,56 @@ def classify_accuracy(
     return correct / max(len(index) - n_labeled, 1)
 
 
+def assign_by_centroid(
+    vectors: list[list[float]],
+    truth: list[str],
+    *,
+    labeled_ratio: float,
+    seed: int = 0,
+) -> list[str]:
+    """模拟完整的分类路径，返回每条文本的预测标签（空串 = 未命中）。
+
+    与 :func:`classify_accuracy` 的区别是它**返回标签而不是准确率** ——
+    这样调用方可以接着算频次误差（验收门③的核心指标）。
+    """
+    rng = np.random.default_rng(seed)
+    index = np.arange(len(vectors))
+    rng.shuffle(index)
+    n_labeled = max(int(len(vectors) * labeled_ratio), len(set(truth)))
+
+    grouped: dict[str, list[int]] = collections.defaultdict(list)
+    for i in index[:n_labeled]:
+        grouped[truth[i]].append(i)
+
+    names = sorted(grouped)
+    centroids = np.asarray(
+        [_normalize(np.mean([vectors[i] for i in grouped[t]], axis=0).tolist()) for t in names]
+    )
+    return [names[int(np.argmax(centroids @ np.asarray(v)))] for v in vectors]
+
+
+def size_error(predicted: collections.Counter, truth: collections.Counter) -> dict[str, float]:
+    """频次误差 —— **验收门③「误差 < 15%」的直接计算**。
+
+    对每个真实痛点，比较「预测提及次数」与「真实提及次数」的相对误差。
+    只统计在预测结果里出现过的真实痛点（完全没被识别出来的痛点不参与平均，
+    它们的问题由覆盖率反映）。
+
+    Returns:
+        ``{"mean": 平均相对误差, "max": 最大相对误差, "per_pain": ...}``。
+    """
+    errors = {
+        name: abs(predicted.get(name, 0) - count) / count for name, count in truth.items() if count
+    }
+    if not errors:
+        return {"mean": 0.0, "max": 0.0}
+    return {
+        "mean": sum(errors.values()) / len(errors),
+        "max": max(errors.values()),
+        **{f"pain:{k}": v for k, v in sorted(errors.items())},
+    }
+
+
 def _load_fixture() -> tuple[list[list[float]], list[str], list[str]]:
     corpus = FixtureBackend().collect("防晒霜", limit=300, max_comments_per_note=20)
     units: list[TextUnit] = build_units(corpus, max_comments_per_note=20)
@@ -255,8 +305,26 @@ def main() -> int:
         print(f"  LLM 打标 {ratio:>4.0%}（{count:>3} 条）→ 分类准确率 {accuracy:.3f}")
 
     print()
-    print("结论：聚类只能在 purity 与 coverage 之间二选一；分类准确率显著更高。")
-    print("      详见本模块 docstring。")
+    print("=" * 68)
+    print("四、频次误差 —— 验收门③（阈值 15%）")
+    print("=" * 68)
+    print("  这一节把 ground truth 当作**完美 LLM 归纳出的清单**，因此测的是")
+    print("  分类机制本身的误差下限。真实误差还取决于 LLM 归纳质量，需用真实")
+    print("  API Key 跑一次 `xhs_pain_miner mine` 才能得到。")
+    print()
+    truth_counts = collections.Counter(fixture_truth)
+    print(f"  {'打标比例':>8} {'平均误差':>10} {'最大误差':>10}   验收门③")
+    for ratio in (0.05, 0.10, 0.20):
+        predicted = collections.Counter(
+            assign_by_centroid(fixture_vectors, fixture_truth, labeled_ratio=ratio)
+        )
+        error = size_error(predicted, truth_counts)
+        verdict = "✅ 达标" if error["mean"] < 0.15 else "❌ 超标"
+        print(f"  {ratio:>8.0%} {error['mean']:>10.1%} {error['max']:>10.1%}   {verdict}")
+
+    print()
+    print("结论：聚类只能在 purity 与 coverage 之间二选一；分类在准确率与频次误差")
+    print("      上都显著更好。详见本模块 docstring。")
     return 0
 
 

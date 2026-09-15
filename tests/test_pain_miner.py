@@ -262,6 +262,27 @@ class TestPainMinerFacade:
         result = _miner().mine("防晒霜", notes_count=20)
         assert any("竞品调研已关闭" in note for note in result.notes)
 
+    def test_disabled_research_never_claims_no_competitors(self):
+        """★ 关闭调研时，空白度必须是中性值，不能是「查证过没有竞品」。
+
+        这是不变式 3 点名的危险实例：把"没查成"当成"没有"。它会同时污染两处 ——
+        机会分每张卡虚高 12.5 分（`competitor_gap` 从 0.5 变成 1.0），报告上还会
+        印出一句"✅ 未发现竞品 —— 查证过，目前没有可查到的成熟实现"。
+
+        这条测试是回归守卫：M1 交付时的确存在这个缺陷，且它出现在真实产物里。
+        """
+        result = _miner().mine("防晒霜", notes_count=20)
+
+        assert result.cards
+        for card in result.cards:
+            gap = card.score_breakdown["competitor_gap"]
+            assert gap == pytest.approx(0.5), (
+                f"卡片「{card.title}」的竞品空白度是 {gap}，"
+                "但这次运行根本没查过竞品 —— 它必须是中性值 0.5"
+            )
+            assert card.research_failed, f"卡片「{card.title}」未标记调研失败"
+            assert not card.competitors
+
     def test_mine_progress_callback_is_called(self):
         """进度回调按阶段推进，且比例单调不减。"""
         stages: list[tuple[str, float]] = []
