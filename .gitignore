@@ -44,3 +44,6 @@ logs/
 .coverage.*
 htmlcov/
 coverage.xml
+
+# Claude Code 的 worktree 隔离目录（开发期产物，不属于仓库内容）
+.claude/worktrees/
