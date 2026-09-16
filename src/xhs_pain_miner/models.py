@@ -31,6 +31,18 @@ SourceKind = Literal["note", "comment"]
 CompetitorSource = Literal["github", "appstore", "chrome", "xhs"]
 """竞品调研数据源。"""
 
+ResearchStatus = Literal["ok", "no_competitor", "unsearchable", "failed"]
+"""竞品调研的结论类别。
+
+定义在这里而不是 :mod:`~xhs_pain_miner.research.outcome` 里，是为了让
+:attr:`OpportunityCard.research_status` 用得上它 —— ``models`` 是数据契约层，
+``research`` 反过来依赖它（``outcome.py`` 从本模块 import 它），反向 import 会成环。
+
+四个取值的含义、以及它们对「竞品空白度」的影响，见
+:mod:`~xhs_pain_miner.research.outcome`：那里的 ``classify_status`` 是唯一的
+判定方，本模块只是把它记在卡片上。
+"""
+
 InsightStage = Literal["new", "growing", "stable", "declining"]
 """痛点趋势阶段。"""
 
@@ -432,17 +444,33 @@ class OpportunityCard:
     score_breakdown: dict[str, float] = field(default_factory=dict)
     feasibility: str = ""
 
-    research_failed: bool = False
-    """这个簇的竞品调研是否**失败**（网络/限流），而不是"查证过没有竞品"。
+    research_status: ResearchStatus = "unsearchable"
+    """这个簇的竞品调研**结论类别**（:data:`ResearchStatus`）。
 
-    两者的含义完全相反：前者是"不知道"，后者是机会分里最强的正面信号。
-    ``competitor_gap`` 因子已经按这个区分给分（失败 → 中性 0.5），但渲染层
-    只看得到分数，只能靠"没有竞品 **且** 空白度恰好为 0.5"反推 —— 那是一条
-    隐式耦合：评分侧哪天在别处也返回中性值，报告就会把"有竞品但没查到"
-    说成"调研未完成"。
+    默认值必须是 ``unsearchable``（"没查成"），**不能**是 ``no_competitor``
+    （"查证过没有竞品"）：后者是机会分里最强的正面信号，一个默认值就能给一个
+    从没查过的方向发满分。缺省构造的卡片（测试、旧产物、将来某个忘了填的调用方）
+    只允许落在保守的一侧。
 
-    显式记下来，反推就不必了。
+    它说的不再是"失败与否"这么一件事，而是一句完整的话："查到竞品" /
+    "查证过，确实没有" / "检索不到，无法判断" / "调研失败"。渲染层据此说四句
+    不同的话 —— 此前它只能靠"没有竞品 **且** 空白度恰好为 0.5"反推"是不是
+    没查成"，而那条反推存在精确碰撞（2 个零 star 的活跃竞品恰好也是 0.5），
+    报告会因此凭空多印一句"本次调研未完成"。
     """
+
+    @property
+    def research_failed(self) -> bool:
+        """评分侧的开关：**除了「查到竞品」与「查证过确实没有」，一律按中性值处理**。
+
+        派生而非字段，理由与
+        :attr:`~xhs_pain_miner.research.outcome.ResearchOutcome.research_failed`
+        完全相同：它是从 ``research_status`` 算出来的不变式，一旦允许调用方自己
+        填，就会出现"status 说 unsearchable、这个布尔说 False"的自相矛盾状态 ——
+        而它唯一的后果是把 0 命中那个假空白（M2 修掉的东西）重新翻回空白度 1.0，
+        每张卡片虚高 12.5 分。映射只写一处，就在下面这一行。
+        """
+        return self.research_status not in ("ok", "no_competitor")
 
     @property
     def has_active_competitor(self) -> bool:
@@ -464,6 +492,12 @@ class OpportunityCard:
           结构性剔除拦不住它。任何真正把载荷送出本机的路径（M4 的众包上传）
           **必须**先用 :func:`find_verbatim_overlap` 对这些字段做回抄检查。
 
+        ``research_status`` 与 ``competitors[].description`` 属于**结构性安全**的
+        那一类：前者是四个固定取值之一（没有自由文本的余地），后者是平台上的公开
+        描述（App 商店文案 / 仓库描述），都不含用户原文。竞品描述必须随结论一起
+        出网 —— 它是"这条竞品为什么算相关"的唯一依据，砍掉它，众包结论就没法被
+        复核。
+
         新增字段前请先确认它不包含任何可识别到个人的信息，并补一条守卫测试。
         """
         return {
@@ -472,6 +506,7 @@ class OpportunityCard:
             "score": round(self.score, 1),
             "score_breakdown": {k: round(v, 3) for k, v in self.score_breakdown.items()},
             "feasibility": self.feasibility,
+            "research_status": self.research_status,
             "pain": self.pain.to_public_dict(),
             "competitors": [c.to_public_dict() for c in self.competitors],
         }

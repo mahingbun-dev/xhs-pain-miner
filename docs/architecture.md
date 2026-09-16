@@ -43,16 +43,20 @@
 [4] 痛点归集  LLM 归纳痛点清单 + embedding 分类  →  痛点簇
   │            （size 即「提及次数」= 分类到该痛点的条数）
   │            ★ 不逐条调 LLM —— 见 4.1
+  │            ★ 痛点名**不再直接当检索词**：它描述"问题"，竞品是"解法" —— 见 4.6
   ▼
 [5] 属性标注  每个痛点调一次 LLM  →  情感 / 趋势 / 实现难度
   │
-[6] 竞品调研  GitHub / 应用商店 / 站内检索  →  list[CompetitorFinding]
+[6] 竞品调研  每个痛点：LLM 翻成「解法检索词」（按渠道分语言）
+  │            → 逐条分发到已接入的渠道（GitHub / App Store）
+  │            → LLM 判定相关性（一次调用判定全部候选）
+  │            → ResearchOutcome（结论 + 检索轨迹 + 竞品列表）
+  │            ★ 「查证过确实没有」与「这次没查成」必须分开 —— 见 4.6
+  ▼
+[7] 评分      多因子加权  →  OpportunityCard(score, score_breakdown, research_status)
   │
   ▼
-[7] 评分      多因子加权  →  OpportunityCard(score, score_breakdown)
-  │
-  ▼
-[8] 渲染      单文件 HTML / Markdown / 终端表格
+[8] 渲染      单文件 HTML / Markdown / 终端表格（四种调研结论说四句不同的话）
 ```
 
 ## 三、模块职责
@@ -71,7 +75,11 @@
 | `pipeline/label.py` | 痛点属性标注（情感 / 趋势 / 难度） | ✅ M1 |
 | `pipeline/vlm.py` | 图片分析（`--deep`），含去重 / 压缩 / 缓存 / 降级 | ✅ M1 |
 | `synthetic.py` | 确定性合成图（仅供 fixture 与测试） | ✅ M1 |
-| `research/github.py` | GitHub 竞品调研 | ✅ M1（商店与站内检索 M2） |
+| `research/query.py` | 痛点 → **解法检索词**（按渠道分语言） | ✅ M2 |
+| `research/github.py` | GitHub 渠道：一条检索词 → 候选 + 平台自报命中数 | ✅ M2 |
+| `research/appstore.py` | App Store 渠道（iTunes Search API，免鉴权） | ✅ M2 |
+| `research/relevance.py` | 相关性判定（LLM，一次调用判定该簇全部候选） | ✅ M2 |
+| `research/outcome.py` | **结论契约**：`ok` / `no_competitor` / `unsearchable` / `failed` | ✅ M2 |
 | `scoring/` | 可解释的多因子机会分 | ✅ M1 |
 | `render/` | 单文件 HTML / Markdown 报告 | ✅ M1 |
 
@@ -178,7 +186,7 @@ M1 最初用 HDBSCAN 聚类来实现它，端到端跑真实本地模型后发�
     0.25 × 痛点强度     # 情感极性 × 强度
   + 0.20 × 提及量       # log 归一，兼作置信度
   + 0.20 × 增长趋势     # 时间序列
-  + 0.25 × 竞品空白度   # GitHub / 应用商店 / 站内调研
+  + 0.25 × 竞品空白度   # 竞品调研结论（GitHub / App Store；没查成 → 中性 0.5）
   + 0.10 × 实现难度⁻¹   # LLM 评估
 )
 ```
@@ -186,12 +194,60 @@ M1 最初用 HDBSCAN 聚类来实现它，端到端跑真实本地模型后发�
 每个因子都写入 `OpportunityCard.score_breakdown`，可逐项展开溯源，**权重可调**。
 这是与黑箱评分产品的核心差异点。
 
+`competitor_gap` 的取值与调研结论一一对应：
+
+| `research_status` | 含义 | 空白度 |
+|---|---|---|
+| `ok` | 查到竞品 | 按活跃竞品数量与热度下调（≤ 0.60） |
+| `no_competitor` | 查证过，平台搜得到但没有相关的实现 | **1.0**（最强的正面信号） |
+| `unsearchable` | 检索不到 / 没有可用的检索词，无法判断 | 中性 0.5 |
+| `failed` | 网络 / 限流导致这次没查成 | 中性 0.5 |
+
+后两行**必须**取中性值：0 命中不是"没有竞品"。M1 曾把 0 命中读成"查证过确实没有"，
+每张卡片因此虚高 12.5 分，报告上还会印"✅ 未发现竞品"—— 用户于是去做一个实际
+已经很拥挤的方向（见 4.6）。
+
+### 4.6 竞品调研：从「痛点名搜索」到「解法词搜索」+ 结论契约
+
+M2 修的是一个**方向性**缺陷。M1 拿痛点名当检索词去搜竞品：
+
+| 查询词 | 类型 | 召回 |
+|---|---|---|
+| `防晒搓泥` | 痛点名（问题） | **0**（App Store 与 GitHub 都是 0） |
+| `美妆 成分查询` | 解法词（方案） | 美丽修行(10913 评分)、你今天真好看(36491 评分) |
+| `小红书 收藏 备份` | 解法词（方案） | 蛋啵(39718 评分)、百度网盘(927283 评分) |
+
+痛点名描述**问题**，竞品是**解法**，两者词汇没有交集 —— 0 命中是必然的。
+而 M1 又把 0 命中解读成"查证过确实没有竞品"（空白度 1.0，机会分里最强的正面
+信号）。两个错误叠加的结果是：报告把一个已经拥挤的方向说成空白。
+
+所以 M2 的竞品调研由四步组成，每一步各自可验证：
+
+1. **翻译**（`research/query.py`）：LLM 把痛点翻成"用户真的会敲进搜索框"的词，
+   并标注该词适合发往哪个渠道（实测 App Store 认中文、GitHub 认英文）。
+   **失败时绝不退回用痛点名兜底** —— 那等于把 M1 的错误重演一遍。
+2. **路由**（`pain_miner._research_clusters`）：只把检索词发往**已接入**的渠道
+   （GitHub / App Store）。未接入渠道（chrome / xhs）的词直接跳过 —— 为它们伪造
+   一条"这次没查成"的轨迹，会让 `merged` 的保守规则把每个簇的 `no_competitor`
+   压成 `unsearchable`，把 M2 唯一的正面信号系统性丢掉。
+3. **判定**（`research/relevance.py`）：LLM 一次判定该簇全部候选（一次调用，
+   成本不随候选数线性增长）。失败时**全部候选留在竞品列表里**（保守取舍，
+   宁可多给几个链接，也不断言"没有竞品"），并带着"未经判定"的警告一起交付。
+4. **出结论**（`research/outcome.py`）：`classify_status` 依据**平台有没有对这个
+   查询返回过东西**判出四种状态之一，连同检索轨迹（搜了什么词、平台回了多少条、
+   留下几条、哪次失败）一起写进 `ResearchOutcome`。
+
+结论一路上行到卡片（`OpportunityCard.research_status`），渲染层据此说四句话 ——
+**"检索不到"与"查证过确实没有"在报告里长得不一样**，用户能看懂下一步该做什么。
+
 ### 4.5 隐私与合规设计
 
 `OpportunityCard.to_public_dict()` 是**唯一**允许离开本机的序列化路径：
 
-- 白名单字段：`score` / `score_breakdown` / `feasibility` / 痛点的簇级统计 / 竞品公开信息
+- 白名单字段：`score` / `score_breakdown` / `feasibility` / `research_status` /
+  痛点的簇级统计 / 竞品公开信息（含平台上的公开 `description`）
 - **原文（`Evidence.text`）与所有 `*_hash` 字段在结构上不进入载荷**
+- 运行提示（`MiningResult.notes`，含降级说明与 LLM 回复预览）**不进入载荷**
 - 个人信息一律哈希（`hash_id`），且哈希前可加本地盐值（`HASH_SALT`）
 - `SHARE_RESULTS` 默认 `false`，必须由用户显式开启
 

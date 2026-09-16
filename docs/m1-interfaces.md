@@ -113,6 +113,18 @@ LLM 只负责起名字。
 因此：**任何降级路径都不得用原文填充这些字段**。LLM 命名失败时用占位名
 （`label.DEGRADED_LABEL_TEMPLATE`），不要截一段证据原文当名字。
 
+**每个出网字段属于哪一类，必须写清楚**（新增字段时一并补齐）：
+
+| 字段 | 类别 | 说明 |
+|---|---|---|
+| `score` / `score_breakdown` / `feasibility` | 结构性安全 | 数字与固定枚举 |
+| `research_status` | 结构性安全 | 四个固定取值之一（`ok` / `no_competitor` / `unsearchable` / `failed`），无自由文本；但它承载的判断（"查证过没有竞品" vs "没查成"）会被下游直接引用，**不能省略** |
+| `pain.*` 的簇级统计（`size` / `sentiment` / `category` / `stage` …） | 结构性安全 | 计数与枚举 |
+| `competitors[].description` | 结构性安全 | 平台上的**公开**描述（App 商店文案 / 仓库描述），不含用户原文；它是"这条竞品为什么算相关"的唯一依据，必须随结论出网 |
+| `competitors[].name` / `url` / `stars` / `last_active` | 结构性安全 | 公开数据 |
+| `title` / `pain.label` / `pain.summary` / `gap_notes` | **需回抄检测** | LLM 生成的自由文本，M4 上传前必须过 `find_verbatim_overlap()` |
+| `MiningResult.notes`（运行提示） | **不出网** | 含降级说明与 LLM 回复预览等自由文本，`to_public_dict()` 结构性不含它；将来若要带上，必须先过回抄检测 |
+
 ### 6. 不可信输入必须转义
 
 采集内容与用户输入都是不可信输入，它们的去向有两处，两处都必须转义：

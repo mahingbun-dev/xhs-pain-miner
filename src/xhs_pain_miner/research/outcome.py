@@ -37,11 +37,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal
 
-from xhs_pain_miner.models import CompetitorFinding, CompetitorSource
+from xhs_pain_miner.models import CompetitorFinding, CompetitorSource, ResearchStatus
 
-ResearchStatus = Literal["ok", "no_competitor", "unsearchable", "failed"]
+# ``ResearchStatus`` 的唯一份定义在 :mod:`~xhs_pain_miner.models`（那里是数据契约
+# 层，:attr:`~xhs_pain_miner.models.OpportunityCard.research_status` 要用它；反过来
+# 让 models 依赖 research 会成环）。本模块把它转出，``from
+# xhs_pain_miner.research.outcome import ResearchStatus`` 因此照旧可用。
 
 STATUS_LABELS: Mapping[ResearchStatus, str] = {
     "ok": "查到竞品",

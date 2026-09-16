@@ -25,6 +25,7 @@ from xhs_pain_miner.models import (
     find_verbatim_overlap,
     hash_id,
 )
+from xhs_pain_miner.research.outcome import ResearchOutcome
 
 SENSITIVE_TEXT = "这句话是绝对不能离开本机的原文内容"
 
@@ -153,6 +154,58 @@ class TestOpportunityCard:
         assert public["pain"]["size"] == 89
         assert public["pain"]["evidence_count"] == 1
         assert public["competitors"][0]["stars"] == 128
+
+    def test_public_dict_carries_the_research_status(self):
+        """★ 结论类别必须出网 —— 它属于**结构性安全**的结论字段。
+
+        不含原文，也没有自由文本的余地（四个固定取值之一）。而它承载的信息是
+        众包结论里最容易被误读的那一条："没有竞品"和"没查成"必须能区分开。
+        """
+        card = self._card()
+        card.research_status = "unsearchable"
+        assert card.to_public_dict()["research_status"] == "unsearchable"
+
+    def test_default_research_status_is_conservative(self):
+        """★ 默认值只能落在"没查成"那一侧。
+
+        缺省构造的卡片（旧产物、忘了填的调用方）不该拿到"查证过确实没有竞品"
+        —— 那是机会分里最强的正面信号。
+        """
+        assert OpportunityCard(id="c1", title="t", pain=PainCluster(id="p1")).research_status == (
+            "unsearchable"
+        )
+
+    def test_research_failed_is_derived_from_status(self):
+        """★ ``research_failed`` 是派生属性，不可能是字段。
+
+        它是评分侧唯一读的那个开关（除 ok / no_competitor 外一律按中性值处理）。
+        允许它独立赋值，就会出现"status 说 unsearchable、布尔说 False"的自相矛盾
+        状态，而后果是把 0 命中那个假空白重新翻回空白度 1.0 —— 卡片虚高 12.5 分。
+        """
+        with pytest.raises(AttributeError):
+            self._card().research_failed = True  # type: ignore[misc]
+
+        for status, expected in (
+            ("ok", False),
+            ("no_competitor", False),
+            ("unsearchable", True),
+            ("failed", True),
+        ):
+            card = self._card()
+            card.research_status = status  # type: ignore[assignment]
+            assert card.research_failed is expected
+
+    def test_research_failed_agrees_with_the_outcome_property(self):
+        """★ 同一条不变式有两份读法（卡片 / 结论），它们必须给出同一个答案。
+
+        两边分别被 ``test_research_failed_is_derived_from_status`` 与
+        ``tests/test_outcome.py::test_research_failed_covers_the_zero_hit_case``
+        守着；这条交叉校验再加一层：有人只改一边时立刻变红。
+        """
+        for status in ("ok", "no_competitor", "unsearchable", "failed"):
+            card = self._card()
+            card.research_status = status  # type: ignore[assignment]
+            assert card.research_failed == ResearchOutcome(status=status).research_failed
 
     def test_to_dict_keeps_full_data(self):
         """本地持久化必须保留完整数据（与上传路径区分开）。"""

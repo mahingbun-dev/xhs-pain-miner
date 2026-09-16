@@ -26,10 +26,9 @@ prompt injection 可以让它吐出任意字符串。因此：
 
 呈现上的两个取舍
 ----------------
-* 竞品调研失败与"确实没有竞品"**必须显示成两句话**。卡片模型里没有
-  ``research_failed`` 字段，但 :func:`~xhs_pain_miner.scoring.opportunity.competitor_gap`
-  只在调研失败时返回中性值 0.5 —— 因此"没有竞品 **且** 空白度为 0.5"就是
-  "没查成"。这是跨模块不变式 3 在渲染层的镜像，见 :func:`_research_failed`。
+* 竞品调研的**四种结论类别**必须显示成四句不同的话（见 :func:`_competitor_verdict`）：
+  "查到竞品" / "查证过，确实没有" / "检索不到，无法判断" / "调研失败"。判据是卡片上
+  的 :attr:`~xhs_pain_miner.models.OpportunityCard.research_status`。
 * 权重不进报告表格，除非能从卡片还原出默认权重（见 :func:`_weights_view`）。
   卡片只保存因子得分与总分，**不保存权重**；编一个"权重"填进表格比不显示更糟。
 """
@@ -43,6 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from xhs_pain_miner.models import Evidence, MiningResult, OpportunityCard
+from xhs_pain_miner.research.outcome import STATUS_LABELS
 from xhs_pain_miner.scoring.opportunity import FACTOR_LABELS, FACTOR_NAMES, NEUTRAL, ScoreWeights
 
 DEFAULT_TITLE = "机会卡片"
@@ -142,27 +142,6 @@ def _score_band(score: float) -> str:
     if score >= _SCORE_MID:
         return "mid"
     return "low"
-
-
-def _gap_is_neutral(card: OpportunityCard) -> bool:
-    """``competitor_gap`` 是否恰好等于中性值。"""
-    gap = card.score_breakdown.get("competitor_gap")
-    return gap is not None and abs(float(gap) - NEUTRAL) < 1e-9
-
-
-def _research_failed(card: OpportunityCard) -> bool:
-    """竞品调研是否失败。
-
-    ``OpportunityCard`` 没有 ``research_failed`` 字段，但
-    :func:`~xhs_pain_miner.scoring.opportunity.competitor_gap` 的返回值是可反推的：
-    **只有**调研失败时才返回中性值 0.5（无竞品 → 1.0，全部停更 → 0.75，
-    有活跃竞品 → 更低的确定值）。因此"没有竞品 **且** 空白度恰为 0.5"
-    ⟺ "这次没查成"。
-
-    这个区分是安全相关的：把"没查成"渲染成"未发现竞品，这个方向还空着"，
-    等于在报告里写下一句无依据的结论，而用户会照着它去选题。
-    """
-    return not card.competitors and _gap_is_neutral(card)
 
 
 def _weights_view(card: OpportunityCard) -> dict[str, float] | None:
@@ -411,31 +390,72 @@ def _render_evidence(card: OpportunityCard, *, max_evidence: int) -> str:
 def _competitor_verdict(card: OpportunityCard) -> str:
     """竞品调研的一句话结论。
 
-    三种状态必须说成三句不同的话：**没查成**（中性值）/ **查了没有**（空白度满分）/
-    **有竞品**。把第一种说成第二种是本项目最危险的一类错误。
-    """
-    findings = card.competitors
-    if _research_failed(card):
-        return (
-            '<p class="verdict">⚠️ 本次竞品调研未完成，「竞品空白度」按中性值 0.5 计 —— '
-            "这不代表该方向没有竞品，只是这次没查成。</p>"
-        )
-    if not findings:
-        return '<p class="verdict">✅ 未发现竞品 —— 查证过，目前没有可查到的成熟实现。</p>'
+    **四种状态必须说成四句不同的话**，判据只能是卡片上的
+    :attr:`~xhs_pain_miner.models.OpportunityCard.research_status`：
 
-    active = [finding for finding in findings if not finding.is_stale]
-    if not active:
+    * ``ok`` —— 查到竞品（卡片上会列出它们）
+    * ``no_competitor`` —— 平台搜得到内容，只是没有与这个痛点相关的实现
+    * ``unsearchable`` —— 检索不到，无法判断
+    * ``failed`` —— 这次没查成
+
+    后两种对**用户该做什么**的指示完全不同：``unsearchable`` 可以换个更贴近
+    "用户会去找什么工具"的说法再搜一次，``failed`` 只能等额度或网络恢复。
+    把它们说成同一句话，用户就无从决定下一步。
+
+    M1 靠 ``competitor_gap == 0.5`` 反推"没查成"，那条推理有一个精确碰撞：
+    :data:`~xhs_pain_miner.scoring.opportunity.ACTIVE_COMPETITOR_COUNT_SCORE` 的下调
+    系数在"2 个活跃竞品、stars 全为 0"时恰好得到 ``0.60 × (1 - 0.5 × 0) = 0.5``
+    —— 与中性值逐位相同（扫描 stars 0…200000 × 竞品数 1…3，只有这一组命中）。
+    于是报告会在"有 2 个竞品、但都没什么热度"的卡片上多印一句"（本次调研未完成，
+    结果可能不完整）" —— 一句没有依据的话。读结论类别之后这个碰撞自然消失：
+    有竞品 ⇒ ``ok``，与空白度是多少无关。
+    """
+    status = card.research_status
+    findings = card.competitors
+    # 先按"有没有竞品"分岔，再在**没有竞品**的那一支里按结论类别说不同的四句话。
+    # 顺序不能反：手工构造的卡片可能出现"写着 no_competitor 却列出 7 个竞品"这种
+    # 不自洽的组合，那时展示真实存在的竞品，比照着状态字段断言"没有竞品"诚实。
+    if findings:
+        active = [finding for finding in findings if not finding.is_stale]
+        if not active:
+            return (
+                f'<p class="verdict">✅ {_esc(len(findings))} 个竞品均已停更 —— '
+                "有人验证过需求，但市场现在是空的。进场前请确认它为什么停下。</p>"
+            )
+        hottest = max((finding.stars or 0) for finding in active)
+        # 有竞品却仍要提示"结果可能不完整"的情形只剩一种：这个簇的调研没有收全
+        # （见 research_status 的说明）。判据走派生属性，与评分侧是同一条不变式。
+        partial = "（本次调研未完成，结果可能不完整）" if card.research_failed else ""
         return (
-            f'<p class="verdict">✅ {_esc(len(findings))} 个竞品均已停更 —— '
-            "有人验证过需求，但市场现在是空的。进场前请确认它为什么停下。</p>"
+            f'<p class="verdict">🔧 {_esc(len(active))} 个竞品仍在活跃维护'
+            f"（共查到 {_esc(len(findings))} 个，最热 {_esc(hottest)}★）—— "
+            f"已有玩家，需要找差异化切口{_esc(partial)}</p>"
         )
-    hottest = max((finding.stars or 0) for finding in active)
-    partial = "（本次调研未完成，结果可能不完整）" if _gap_is_neutral(card) else ""
-    return (
-        f'<p class="verdict">🔧 {_esc(len(active))} 个竞品仍在活跃维护'
-        f"（共查到 {_esc(len(findings))} 个，最热 {_esc(hottest)}★）—— "
-        f"已有玩家，需要找差异化切口{_esc(partial)}</p>"
-    )
+
+    if status in ("unsearchable", "failed"):
+        label = _esc(STATUS_LABELS[status])
+        detail = (
+            # "检索不到"只是这个状态最常见的成因（M2 修的正是它），不是全部：
+            # 检索词生成失败、调研被关闭时也会落到这里，那时说"检索不到"就是一句
+            # 失实的话（我们根本没有发出去过任何检索词）。所以两种成因都写出来。
+            "这不代表该方向没有竞品：可能是这些检索词在平台上没有返回任何东西"
+            "（换个更贴近「用户会去找什么工具」的说法再搜，往往就能搜到），"
+            "也可能是这次没有可用的检索词。"
+            if status == "unsearchable"
+            else "这不代表该方向没有竞品，只是这次没查成。"
+        )
+        return (
+            f'<p class="verdict">⚠️ {label} —— 「竞品空白度」按中性值 '
+            f"{_num(NEUTRAL, 1)} 计，{detail}</p>"
+        )
+    if status == "no_competitor":
+        return (
+            f'<p class="verdict">✅ {_esc(STATUS_LABELS[status])} —— '
+            "平台能搜到内容，但没有与这个痛点相关的实现（检索轨迹见运行提示）。</p>"
+        )
+    # ``ok`` 却没有竞品 —— 只有手工构造的卡片会这样（classify_status 产不出它）。
+    # 此时说"查证过确实没有"是没有依据的断言，如实说没有记录即可。
+    return '<p class="verdict">本次没有可展示的竞品记录。</p>'
 
 
 def _render_competitors(card: OpportunityCard) -> str:

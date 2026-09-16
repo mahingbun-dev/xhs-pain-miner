@@ -4,9 +4,10 @@
 
 1. **HTML 转义**：卡片字段来自采集内容（不可信输入）。断言必须落在"输出里没有
    未转义的 ``<script``"上，而不是"没抛异常"—— 后者是恒真断言，守不住任何东西。
-2. **调研失败 ≠ 没有竞品**：报告里这两句话必须长得不一样。渲染层靠
-   ``competitor_gap == 0.5 且无竞品`` 反推，这条推理错了就会在报告里写下一句
-   无依据的结论。
+2. **调研结论的四种状态必须说成四句不同的话**（查到 / 查证过没有 / 检索不到 /
+   没查成）。判据是卡片上的 ``research_status`` —— M1 靠 ``competitor_gap == 0.5``
+   反推，那条推理有精确碰撞（见
+   ``TestHtmlResearchState::test_two_cold_competitors_do_not_look_like_a_failure``）。
 3. **Markdown 不含证据原文**：这是与 HTML 产物刻意的设计差异，用一条守卫测试钉住。
 """
 
@@ -21,6 +22,7 @@ from xhs_pain_miner.models import (
     MiningResult,
     OpportunityCard,
     PainCluster,
+    ResearchStatus,
     RunCost,
 )
 from xhs_pain_miner.render.html import DEFAULT_TITLE, render_html, write_html
@@ -73,7 +75,14 @@ def make_card(
     score: float = 78.4,
     score_breakdown: dict[str, float] | None = None,
     feasibility: str = "个人可做 / 1-2 周",
+    research_status: ResearchStatus = "no_competitor",
 ) -> OpportunityCard:
+    """造一张卡片。
+
+    ``research_status`` 的默认值 ``no_competitor``（"查证过，没有竞品"）与另外两个
+    默认值（``competitors=[]``、``competitor_gap=1.0``）是配套的 —— 这三个字段说的
+    必须是同一件事，否则造出来的卡片本身就是不自洽的。
+    """
     return OpportunityCard(
         id=id_,
         title=title,
@@ -90,6 +99,7 @@ def make_card(
             "feasibility": 0.75,
         },
         feasibility=feasibility,
+        research_status=research_status,
     )
 
 
@@ -255,35 +265,102 @@ class TestHtmlSelfContained:
 
 
 class TestHtmlResearchState:
-    """★ 三种状态必须说成三句不同的话。"""
+    """★ 四种调研结论必须说成四句不同的话。
+
+    M1 靠 ``competitor_gap == 0.5`` 反推"调研失败"，M2 改成读
+    ``card.research_status``。这里除了四种状态各自的措辞，还钉住了那条反推法的
+    精确碰撞（见 :meth:`test_two_cold_competitors_do_not_look_like_a_failure`）。
+    """
 
     def test_failed_research_is_not_reported_as_no_competitor(self):
         card = make_card(
             competitors=[],
+            research_status="failed",
             score_breakdown={
                 "pain_strength": 0.9,
                 "mention_volume": 0.7,
                 "growth_trend": 0.5,
-                "competitor_gap": 0.5,  # 中性值 = 调研失败
+                "competitor_gap": 0.5,  # 中性值
                 "feasibility": 0.75,
             },
         )
         document = render_html(make_result(cards=[card]))
-        assert "调研未完成" in document
-        assert "未发现竞品" not in document
+        assert "调研失败" in document
+        assert "没有相关竞品" not in document
         assert "不代表该方向没有竞品" in document
 
-    def test_verified_empty_market_says_no_competitor(self):
-        card = make_card(competitors=[], score_breakdown={"competitor_gap": 1.0})
+    def test_unsearchable_is_not_reported_as_no_competitor(self):
+        """★ "检索不到"与"查证过确实没有"是两件事，措辞与下一步动作都不同。
+
+        括号里那句"也可能是这次没有可用的检索词"是刻意加的：``unsearchable``
+        同时覆盖"检索词没返回东西"与"压根没有可用的检索词"（检索词生成失败、
+        调研被关闭），只写前者会在后一种情形下变成一句失实的话。
+        """
+        card = make_card(
+            competitors=[],
+            research_status="unsearchable",
+            score_breakdown={"competitor_gap": 0.5},
+        )
         document = render_html(make_result(cards=[card]))
-        assert "未发现竞品" in document
+        assert "检索不到" in document
+        assert "没有相关竞品" not in document
+        assert "也可能是这次没有可用的检索词" in document
+
+    def test_unsearchable_and_failed_say_different_things(self):
+        def verdict(text: str) -> str:
+            return text.split('class="verdict"')[1].split("</p>")[0]
+
+        unsearchable = render_html(
+            make_result(cards=[make_card(competitors=[], research_status="unsearchable")])
+        )
+        failed = render_html(
+            make_result(cards=[make_card(competitors=[], research_status="failed")])
+        )
+        assert verdict(unsearchable) != verdict(failed)
+
+    def test_verified_empty_market_says_no_competitor(self):
+        card = make_card(
+            competitors=[], research_status="no_competitor", score_breakdown={"competitor_gap": 1.0}
+        )
+        document = render_html(make_result(cards=[card]))
+        assert "没有相关竞品" in document
+        assert "调研失败" not in document
+        assert "检索不到" not in document
+
+    def test_two_cold_competitors_do_not_look_like_a_failure(self):
+        """★ 反推法的精确碰撞：2 个零 star 的活跃竞品，空白度恰好也是 0.5。
+
+        ``0.60 × (1 - 0.5 × 0) = 0.5`` —— 与中性值逐位相同。M1 的渲染层据此多印
+        一句"（本次调研未完成，结果可能不完整）"，而这张卡片上明明列着 2 个竞品。
+        改成读结论类别后，有竞品 ⇒ ``ok``，与空白度是多少无关。
+        """
+        cold = [
+            CompetitorFinding(
+                source="github",
+                name=f"cold-{i}",
+                url=f"https://e.test/cold-{i}",
+                stars=0,
+                last_active=date.today(),
+            )
+            for i in range(2)
+        ]
+        card = make_card(
+            competitors=cold,
+            research_status="ok",
+            score_breakdown={"competitor_gap": 0.5},
+        )
+        document = render_html(make_result(cards=[card]))
+        assert "活跃维护" in document
         assert "调研未完成" not in document
+        assert "结果可能不完整" not in document
 
     def test_all_stale_competitors_are_reported_honestly(self):
         stale = CompetitorFinding(
             source="github", name="old", url="https://e.test/old", stars=128, last_active=OLD_DATE
         )
-        document = render_html(make_result(cards=[make_card(competitors=[stale])]))
+        document = render_html(
+            make_result(cards=[make_card(competitors=[stale], research_status="ok")])
+        )
         assert "均已停更" in document
         assert "2023-05-01" in document
 
@@ -295,7 +372,9 @@ class TestHtmlResearchState:
             stars=9000,
             last_active=date.today(),
         )
-        document = render_html(make_result(cards=[make_card(competitors=[active])]))
+        document = render_html(
+            make_result(cards=[make_card(competitors=[active], research_status="ok")])
+        )
         assert "活跃维护" in document
         assert "9000" in document
 
@@ -522,10 +601,30 @@ class TestMarkdownLayout:
         assert "长尾怪癖" not in markdown
 
     def test_research_failure_is_not_reported_as_empty_market(self):
-        card = make_card(competitors=[], score_breakdown={"competitor_gap": 0.5})
+        card = make_card(
+            competitors=[], research_status="failed", score_breakdown={"competitor_gap": 0.5}
+        )
         markdown = render_markdown(make_result(cards=[card]))
-        assert "调研未完成" in markdown
-        assert "未发现竞品" not in markdown
+        assert "调研失败" in markdown
+        assert "没有相关竞品" not in markdown
+
+    def test_unsearchable_is_not_reported_as_empty_market(self):
+        """★ 分享出去的那一份更不能把"检索不到"写成"未发现竞品"。"""
+        card = make_card(
+            competitors=[], research_status="unsearchable", score_breakdown={"competitor_gap": 0.5}
+        )
+        markdown = render_markdown(make_result(cards=[card]))
+        assert "检索不到" in markdown
+        assert "没有相关竞品" not in markdown
+
+    def test_failed_and_unsearchable_read_differently(self):
+        failed = render_markdown(
+            make_result(cards=[make_card(competitors=[], research_status="failed")])
+        )
+        unsearchable = render_markdown(
+            make_result(cards=[make_card(competitors=[], research_status="unsearchable")])
+        )
+        assert failed != unsearchable
 
     def test_empty_result_renders(self):
         markdown = render_markdown(make_result(cards=[], clusters=[]))

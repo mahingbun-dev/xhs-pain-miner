@@ -1,37 +1,67 @@
-"""竞品调研 —— 在公开渠道查证「已经有人做了吗」。
+"""竞品调研 —— GitHub 渠道。
 
-本模块是「机会分」里**竞品空白度**因子的数据来源，也是本产品与"免费的 LLM
+本模块是「机会分」里**竞品空白度**因子的一个数据来源，也是本产品与"免费的 LLM
 摘要"拉开差距的第二点（第一点是证据链）：模型可以凭空说"这个方向没人做"，
 而这里的结果是查证过的、带 URL 和时间戳的。
 
-M1 只做 GitHub（免费 API、无需鉴权即可用、结果可验证）。App Store / Chrome
-商店 / 小红书站内检索在 M2 补齐，它们的结论形态与这里一致
-（:class:`~xhs_pain_miner.models.CompetitorFinding`），因此可以并行接入。
+本模块**只做一件事**：把一条检索词发给 GitHub，把平台的回应如实翻译成候选。
+检索词从哪来（:mod:`~xhs_pain_miner.research.query` 的解法词生成）、要在哪几个
+渠道之间路由、候选最终是不是竞品（:mod:`~xhs_pain_miner.research.relevance`）、
+结论怎么下（:mod:`~xhs_pain_miner.research.outcome`）都不在这里 —— 那些是调用方
+（:meth:`~xhs_pain_miner.pain_miner.PainMiner._research_clusters`）的事。
+
+M1 曾经在本模块里用 ``PainCluster.label``（痛点名）直接拼检索词。那是 M2 修掉的
+方向性缺陷：痛点名描述的是**问题**，竞品是**解法**，两者词汇没有交集，实测
+``防晒搓泥`` 在这条通道上必然 0 命中，而 0 命中又会被读成"查证过确实没有竞品"。
+所以 ``build_queries`` 已删除 —— 检索词只能来自解法词生成，本模块不再自己造词。
+
+``total_count`` 到底能支撑什么判断
+--------------------------------
+:class:`GitHubResult.total_hits` 是 :class:`~xhs_pain_miner.research.outcome.QueryTrace`
+的 ``hits`` 来源，而 :func:`~xhs_pain_miner.research.outcome.classify_status` 用它区分
+两种此前被混为一谈的处境（详见 outcome 模块文档）：
+
+* 平台**返回过内容**但不相关 → ``no_competitor``（空白度 1.0，最强的正面信号）
+* 平台**压根没返回东西** → ``unsearchable``（空白度中性 0.5）
+
+它是**平台自报的全站命中数**，而不是"我们拿回来几条"。取它是为了可复核 ——
+用户在 GitHub 搜索框里重放同一个词，界面上看到的正是这个数字。
+它**不能**支撑"这个赛道有几个竞品"（受 ``per_page`` 控制），也**不能**支撑
+"市场有多大"（这个问题根本不在检索接口的回答范围里）。
 """
 
 from __future__ import annotations
 
-import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
 import httpx
 
-from xhs_pain_miner.models import CompetitorFinding, PainCluster
-from xhs_pain_miner.pipeline.label import DEGRADED_LABEL_TEMPLATE
+from xhs_pain_miner.models import CompetitorFinding
 
 GITHUB_SEARCH_URL = "https://api.github.com/search/repositories"
 """GitHub 仓库搜索端点。"""
 
 SEARCH_TIMEOUT = 15.0
 
-MAX_QUERIES_PER_CLUSTER = 3
-"""每个痛点最多发起多少次搜索。
+DEFAULT_LIMIT = 8
+"""一条检索词默认取回多少条候选。
 
-GitHub 搜索接口对未认证调用限制约 10 次/分钟。一个 30 簇的分析要跑 90 次搜索，
-必须**串行 + 限速**，否则会撞 403 并让竞品调研整段失效。
+与 :data:`~xhs_pain_miner.research.appstore.DEFAULT_LIMIT` 取同一个数：两个渠道的
+候选最终会一起送进 :func:`~xhs_pain_miner.research.relevance.judge_relevance`，
+单渠道的取回量决定了那次判定的成本与准确率，两个渠道不该有不同的量级。
+"""
+
+MAX_DESCRIPTION_CHARS = 350
+"""``description`` 的截断长度。
+
+GitHub 对仓库描述本身就有 350 字上限，所以这个截断在生产数据上通常是空操作。
+留着它是因为**契约**：描述是相关性判定的主要依据，它拼进提示词的长度必须由
+"候选数 × 每条的上限"决定，而不能由第三方平台今天的字段习惯决定 —— 哪天
+GitHub 放开这个上限，判定提示词的体积不该跟着失控。
 """
 
 SEARCH_INTERVAL_ANONYMOUS = 6.0
@@ -51,24 +81,6 @@ _RATE_LIMIT_STATUS = frozenset({403, 429})
 
 _MAX_RESULTS_PER_PAGE = 100
 
-_MAX_TERM_CHARS = 40
-"""搜索词的最大长度。
-
-GitHub 的仓库搜索对长自然语言句子的效果极差（它匹配的是仓库名 / 描述 / README），
-过长的搜索词等于把所有条件 AND 在一起，结果必然为空 —— 而"空"会被解读成
-"这个方向没人做过"。
-"""
-
-_PLACEHOLDER_PREFIX = DEGRADED_LABEL_TEMPLATE.partition("{")[0]
-"""降级占位名的前缀（``"<未命名痛点 #"``）。
-
-用占位名去搜 GitHub 只会得到空结果，而空结果的含义是"查证过，确实没有竞品" ——
-一个降级的簇会因此凭空拿到最高的空白度分。所以占位名必须被识别出来并跳过。
-"""
-
-_WORDISH_RE = re.compile(r"[0-9A-Za-z一-鿿]")
-"""至少要有一个可检索的字符，纯标点的"搜索词"搜不出任何东西。"""
-
 _transport: httpx.BaseTransport | None = None
 """测试注入点：非 ``None`` 时，所有请求都走这个传输层（``httpx.MockTransport``）。
 
@@ -81,85 +93,69 @@ _sleep: Callable[[float], None] = time.sleep
 """限速用的睡眠函数（测试注入点，避免测试真的等 6 秒）。"""
 
 
-def build_queries(
-    cluster: PainCluster,
-    *,
-    keyword: str,
-    max_queries: int = MAX_QUERIES_PER_CLUSTER,
-) -> list[str]:
-    """为痛点簇生成搜索词。
+@dataclass(frozen=True, slots=True)
+class GitHubResult:
+    """一次 GitHub 检索的结果。
 
-    用 :attr:`PainCluster.label`（LLM 命名后的痛点名）而非原始证据文本 ——
-    搜索接口对长自然语言句子的效果极差。
+    Attributes:
+        findings: 映射成功的候选。**没有 URL 的条目不在其中**（见
+            :func:`_to_finding`），所以它可能比 ``total_hits`` 少。
+        total_hits: 平台自报的全站命中数（``total_count``）。语义与能支撑的
+            判断见模块文档 —— 它**不是**"我们拿回来几条"，也**不是**"这个赛道
+            有几个竞品"。
+    """
+
+    findings: list[CompetitorFinding]
+    total_hits: int
+
+
+class SearchPacer:
+    """GitHub 搜索的串行节流器 —— 两次请求之间补足最小间隔。
+
+    做成对象而不是模块级全局状态，有两个理由：
+
+    * **额度是按"这台机器发出的请求"算的**，而它是**跨簇**的。M1 把上一次请求
+      的时间戳放在单个簇的循环里，于是每个簇的第一个词都是"立刻发" —— 12 个簇
+      排下来就是一串脉冲，正是它自己的文档警告过的那种撞 403 的节奏。把节流器
+      提到整个运行的范围（调用方构造一次、逐个簇传进去），跨簇的间隔才真正存在。
+    * 全局状态会让测试之间互相干扰（上一个用例的请求时间戳泄漏到下一个用例），
+      而这里的测试全部靠注入 ``_sleep`` 来断言"等了多少"。
 
     Args:
-        cluster: 已命名的痛点簇。
-        keyword: 品类关键词，用于收窄范围。
-        max_queries: 最多生成几个查询词。
-
-    Returns:
-        查询词列表。生成不出合理查询时返回空列表（调用方据此跳过该簇，
-        而不是拿整段原文去搜）。
+        token: 有 Token 时额度约 30 次/分钟，间隔可以短得多。
     """
-    if max_queries <= 0:
-        return []
 
-    # label 为空（聚类后尚未命名）或仍是降级占位名时，没有可用的检索词。
-    # 用占位名搜出来的空结果会被误读成"没有竞品"，宁可返回空列表让调用方
-    # 把空白度置为中性。
-    label = _clean_term(cluster.label)
-    if not label or label.startswith(_PLACEHOLDER_PREFIX):
-        return []
+    def __init__(self, *, token: str | None = None) -> None:
+        self.interval = SEARCH_INTERVAL_AUTHENTICATED if token else SEARCH_INTERVAL_ANONYMOUS
+        self._last_started: float | None = None
 
-    term = _clean_term(keyword)
-    # 标签优先单独搜（中文标签命中率本就低，再 AND 一个词只会更低）；
-    # 关键词不含在标签里时，再用它收窄一次。
-    candidates = [label]
-    if term and term not in label:
-        candidates.append(f"{label} {term}")
-
-    queries: list[str] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        key = candidate.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        queries.append(candidate)
-        if len(queries) >= max_queries:
-            break
-    return queries
-
-
-def _clean_term(value: Any) -> str:
-    """规范化搜索词：压平空白、截断过长内容、丢弃纯标点。"""
-    if not isinstance(value, str):
-        return ""
-    flat = " ".join(value.split())
-    if len(flat) > _MAX_TERM_CHARS:
-        flat = flat[:_MAX_TERM_CHARS].strip()
-    if not _WORDISH_RE.search(flat):
-        return ""
-    return flat
+    def wait(self) -> None:
+        """等到距上一次请求足够久之后才放行。**第一次调用不等待。**"""
+        if self._last_started is not None:
+            _pace(self._last_started, self.interval)
+        self._last_started = time.monotonic()
 
 
 def search_repositories(
     query: str,
     *,
-    limit: int = 8,
+    limit: int = DEFAULT_LIMIT,
     token: str | None = None,
     timeout: float = SEARCH_TIMEOUT,
-) -> list[CompetitorFinding]:
+) -> GitHubResult:
     """搜索 GitHub 仓库。
 
+    只做一次请求、不做节流 —— 请求之间要不要等由调用方用 :class:`SearchPacer`
+    决定（额度是跨簇算的，单个渠道函数看不到全貌）。
+
     Args:
-        query: 搜索词。
+        query: 检索词。
         limit: 最多返回多少条。
         token: GitHub Token。``None`` 时走匿名调用（限流更严）。
         timeout: 请求超时。
 
     Returns:
-        竞品条目。``stars`` 取 ``stargazers_count``，``last_active`` 取
+        检索结果。``stars`` 取 ``stargazers_count``，``last_active`` 取
         ``pushed_at``（而不是 ``updated_at`` —— 后者会被 star 之类的元数据变更
         触发，不能反映真实开发活动）。
 
@@ -170,7 +166,7 @@ def search_repositories(
     """
     if limit <= 0:
         # 调用方明确要求不取结果：这是"确实没有"，不是失败。
-        return []
+        return GitHubResult(findings=[], total_hits=0)
 
     term = " ".join(query.split()) if isinstance(query, str) else ""
     if not term:
@@ -228,7 +224,31 @@ def search_repositories(
         findings.append(finding)
         if len(findings) >= limit:
             break
-    return findings
+    return GitHubResult(findings=findings, total_hits=_declared_hits(payload, payload["items"]))
+
+
+def _declared_hits(payload: Mapping[str, Any], items: list[Any]) -> int:
+    """取平台自报的命中数（``QueryTrace.hits`` 的来源）。
+
+    用 ``total_count`` 而不是 ``len(items)``：它才是**用户自己重放这次查询时能看到
+    的数字**（GitHub 搜索结果页上写的就是它），而可复核性正建立在"用户能重放"上。
+    自报值缺失 / 不是非负整数时退回实际返回条数 —— "不知道平台怎么报的"，但实际
+    拿回来几条是确定的。
+
+    与 :mod:`~xhs_pain_miner.research.appstore` 的同名函数有一处**刻意不同**：
+    那里取完自报值后还要按实际条数截断（iTunes 的 ``resultCount`` 恒等于本次响应
+    的条数，比它大就是平台在虚报），而 GitHub 的 ``total_count`` 是**全站**命中数，
+    天然远大于本次取回的条数，截断它就等于把平台的自报值换成我们的分页大小。
+
+    唯一必须挡住的偏离是"自报有命中、却一条都没返回"：那多半是平台内部过滤的
+    结果，而我们手里空空如也。把它当成"搜得到、只是不相关"会把
+    ``unsearchable`` 翻成 ``no_competitor``（空白度 1.0，最强的正面信号）——
+    一条通往假机会的路径，不值得留。这个方向上的偏差一律归零。
+    """
+    declared = payload.get("total_count")
+    if isinstance(declared, bool) or not isinstance(declared, int) or declared < 0:
+        return len(items)
+    return declared if items else 0
 
 
 def _rate_limit_message(response: httpx.Response, *, token: bool) -> str:
@@ -255,8 +275,14 @@ def _to_finding(item: Any) -> CompetitorFinding | None:
     """把一条 GitHub 搜索结果映射成 :class:`CompetitorFinding`。
 
     映射不出 URL 的条目直接丢弃 —— 没有 URL 的竞品无法被用户核实，而本模块
-
     存在的全部意义就是"结论可以被点开验证"。
+
+    ``description`` **必须带上**：它是
+    :func:`~xhs_pain_miner.research.relevance.judge_relevance` 判定"这条结果是不是
+    真的在解决这个痛点"的主要依据。M1 把它留空了（恒为空字符串），于是判定只能
+    看仓库名 —— 而 ``Dujltqzv/Some-Many-Books`` 这个名字本身看不出它是个"个人书籍
+    收藏清单"（实测它就是因为与痛点无关而被误当成竞品）。只给名字判不出来，这是
+    M1 唯一在用的渠道恰好是判定质量最差的那一个的直接原因。
     """
     if not isinstance(item, dict):
         return None
@@ -280,9 +306,28 @@ def _to_finding(item: Any) -> CompetitorFinding | None:
         # pushed_at 才是"最后一次代码提交"，updated_at 会被改 star 数、改描述这类
         # 元数据操作刷新 —— 用它判断"这个项目还活着吗"会把停更项目看成活跃项目。
         last_active=_parse_timestamp(item.get("pushed_at")),
+        description=_describe(item.get("description")),
         # gap_notes 是"这个竞品没覆盖什么"，需要结合痛点由 LLM 归纳，这里留空
         gap_notes="",
     )
+
+
+def _describe(value: Any) -> str:
+    """把仓库描述压成适合放进结论的摘要。
+
+    压平空白是必要的：GitHub 的描述字段里出现换行的机会不多，但它同样会进
+    Markdown 产物与判定提示词 —— 提示词是**按行**组织的，一条描述里混进换行会让
+    一条候选看起来像两条，模型给出的编号就可能整体错位。
+
+    类型不对时返回空串（"平台没给"），由判定模块显示成"（平台未提供）"。
+    不填任何占位文案：那会被下游当成一段真实的描述读进去。
+    """
+    if not isinstance(value, str):
+        return ""
+    flat = " ".join(value.split())
+    if len(flat) <= MAX_DESCRIPTION_CHARS:
+        return flat
+    return flat[:MAX_DESCRIPTION_CHARS].rstrip() + "…"
 
 
 def _parse_timestamp(value: Any) -> date | None:
@@ -307,76 +352,3 @@ def _pace(last_started: float, interval: float) -> None:
     remaining = interval - (time.monotonic() - last_started)
     if remaining > 0:
         _sleep(remaining)
-
-
-def research_cluster(
-    cluster: PainCluster,
-    *,
-    keyword: str,
-    token: str | None = None,
-    limit: int = 8,
-    max_queries: int = MAX_QUERIES_PER_CLUSTER,
-) -> tuple[list[CompetitorFinding], str | None]:
-    """调研单个痛点簇的竞品。
-
-    Args:
-        cluster: 已命名的痛点簇。
-        keyword: 品类关键词。
-        token: GitHub Token。
-        limit: 最多返回多少条竞品。
-        max_queries: 每个簇最多搜几次。
-
-    Returns:
-        ``(竞品列表, 警告)``。按 URL 去重，跨查询词合并。
-
-    Note:
-        **失败时必须返回警告而不是空列表**：空列表的含义是"查证过，确实没有
-        竞品"，这是机会分里最强的正面信号；而调用失败的含义是"没查成"。
-        把后者当成前者，会让一次网络抖动凭空造出一个高机会分的假机会。
-        调用方必须依据警告把该簇的空白度因子置为中性值。
-    """
-    identity = _clean_term(cluster.label) or cluster.id or "未知簇"
-    queries = build_queries(cluster, keyword=keyword, max_queries=max_queries)
-    if not queries:
-        return [], (
-            f"簇「{identity}」没有可用的检索词（标签缺失或仍是降级占位名），"
-            "已跳过 GitHub 竞品调研；该簇的竞品空白度必须按中性值处理 —— "
-            "没查过不等于没有竞品。"
-        )
-
-    if limit <= 0:
-        return [], (
-            f"簇「{identity}」的竞品调研被跳过（limit={limit}），未查证任何竞品；"
-            "该簇的竞品空白度必须按中性值处理。"
-        )
-
-    interval = SEARCH_INTERVAL_AUTHENTICATED if token else SEARCH_INTERVAL_ANONYMOUS
-    findings: list[CompetitorFinding] = []
-    seen: set[str] = set()
-    failure: str | None = None
-    last_started = 0.0
-
-    # 串行 + 限速：GitHub 匿名额度约 10 次/分钟，并发搜索只会一起撞 403
-    for index, query in enumerate(queries):
-        if index:
-            _pace(last_started, interval)
-        last_started = time.monotonic()
-        try:
-            results = search_repositories(query, limit=limit, token=token)
-        except RuntimeError as exc:
-            # 快速放弃：已经限流时继续搜只会加深限流，让后面的簇也一起失败
-            failure = f"查询「{query}」失败：{exc}"
-            break
-        for finding in results:
-            if finding.url in seen:
-                continue
-            seen.add(finding.url)
-            findings.append(finding)
-
-    del findings[limit:]
-    if failure is not None:
-        return findings, (
-            f"簇「{identity}」的 GitHub 竞品调研未完成（{failure}）；"
-            "结果不完整，该簇的竞品空白度必须按中性值处理。"
-        )
-    return findings, None

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from xhs_pain_miner.collectors.base import CollectorBackend
@@ -24,6 +25,7 @@ from xhs_pain_miner.llm.base import LLMError
 from xhs_pain_miner.llm.factory import build_provider
 from xhs_pain_miner.models import (
     CompetitorFinding,
+    CompetitorSource,
     MiningResult,
     PainCluster,
     RawCorpus,
@@ -36,7 +38,10 @@ from xhs_pain_miner.pipeline.embed import build_embedder
 from xhs_pain_miner.pipeline.label import label_clusters
 from xhs_pain_miner.pipeline.taxonomy import assign_units
 from xhs_pain_miner.pipeline.vlm import SqliteVlmCache, VlmAnalyzer
-from xhs_pain_miner.research.github import research_cluster
+from xhs_pain_miner.research import appstore, github
+from xhs_pain_miner.research.outcome import QueryTrace, ResearchOutcome, build_outcome
+from xhs_pain_miner.research.query import SolutionQuery, build_solution_queries
+from xhs_pain_miner.research.relevance import judge_relevance
 from xhs_pain_miner.scoring.opportunity import build_cards
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -64,6 +69,57 @@ _INVISIBLE_CHARS = (
     "\ufeff"  # BOM / ZWNBSP
 )
 _REMOVE_INVISIBLE = str.maketrans("", "", _INVISIBLE_CHARS)
+
+_ROUTED_CHANNELS: tuple[CompetitorSource, ...] = ("github", "appstore")
+"""本次真正接进来的渠道 —— 只有实现了的渠道才配拿到一条检索词。
+
+T1 的检索词生成会让模型为 ``chrome`` / ``xhs`` 也出词（提示词里列了四个渠道），
+而这两个渠道在本版本里**没有实现**。为它们造一条"这次没查成"的轨迹是一条
+捷径，代价却是系统性的：
+
+    :meth:`~xhs_pain_miner.research.outcome.ResearchOutcome.merged` 的保守规则是
+    "只要有一个渠道没查成，整体就不能断言没有竞品"，而一个从没实现过的渠道
+    **每一个簇**都必然没查成 —— 于是每个簇的 ``no_competitor``（空白度 1.0，
+    M2 唯一的正面信号）都会被压成 ``unsearchable``（中性 0.5）。
+
+换句话说，"没实现"会被冒充成"这次没查成"，而 M2 费力修好的那个假空白会以另一种
+形式回来。未接入的渠道只有两种诚实的处理：不查，或者不查还说明白 ——
+本模块选了后者（见 :meth:`_research_cluster` 里的提示）。
+
+顺序是固定的（不按模型给出的推荐顺序重排）：同一份语料两次运行必须得到同一份
+检索轨迹，否则"我照着报告里的词再搜一次"这种复核行为会对不上。
+"""
+
+_NOT_SEARCHED_WARNING = (
+    "本次没有做竞品调研，「竞品空白度」因子按中性值 0.5 计算 —— 未调研不等于没有竞品。"
+)
+"""没查过时的结论警告（关闭调研 / 超出调研上限的簇共用）。
+
+措辞刻意与 ``no_competitor`` 分开：后者是"查证过确实没有"，是这个因子里最强的
+正面信号。
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class _ChannelAttempt:
+    """一次渠道查询的结果 —— 相关性判定之前的样子。
+
+    它与 :class:`~xhs_pain_miner.research.outcome.QueryTrace` 的差别只有一处，但
+    那一处很关键：这里只有"平台给了什么"，而 ``kept``（留下几条）要等跨渠道判定
+    做完才知道。先把原始结果攒下来、判定完再回填 ``kept``，是为了不用为填一个
+    计数再搜一遍平台 —— 那既慢，又会让用户重放时看到与报告不同的数字。
+
+    Attributes:
+        query: 实际发出的那条检索词（含渠道）。
+        findings: 平台返回并映射成功的候选（已做单渠道跨查询去重）。
+        hits: 平台自报的原始命中数。
+        error: 该次查询的失败原因；非 ``None`` 表示**这次没查成**。
+    """
+
+    query: SolutionQuery
+    findings: tuple[CompetitorFinding, ...] = ()
+    hits: int = 0
+    error: str | None = None
 
 
 def normalize_keyword(keyword: str) -> str:
@@ -330,16 +386,15 @@ class PainMiner:
 
         # -------------------------------------------------------- 7. 竞品调研 --
         notify("竞品调研", 0.75)
-        findings, failed = self._research_clusters(clusters, keyword, messages)
+        outcomes = self._research_clusters(clusters, keyword, messages)
 
         # ------------------------------------------------------------ 8. 评分 --
         notify("评分", 0.9)
         cards, warnings = build_cards(
             clusters,
-            findings_by_cluster=findings,
+            outcomes=outcomes,
             weights=self.settings.to_weights(),
             keyword=keyword,
-            failed_clusters=sorted(failed),
         )
         messages.extend(warnings)
 
@@ -477,47 +532,239 @@ class PainMiner:
         clusters: Sequence[PainCluster],
         keyword: str,
         messages: list[str],
-    ) -> tuple[dict[str, list[CompetitorFinding]], set[str]]:
-        """逐个簇调研竞品。**失败必须与「没有竞品」区分开**（见返回的 failed 集合）。"""
-        findings: dict[str, list[CompetitorFinding]] = {}
-        failed: set[str] = set()
+    ) -> dict[str, ResearchOutcome]:
+        """逐个簇做多渠道竞品调研，返回 ``cluster.id`` → **结论**。
+
+        流程（每一步都可能得出"没查成"，而且每一步都必须如实保留这个结论）：
+
+            build_solution_queries（痛点 → 解法词）
+              → 逐条查询分发到渠道（只发已接入的）
+              → 收集检索轨迹 + 候选（单渠道内按 URL 去重）
+              → judge_relevance（一次调用判定全部候选）
+              → 每个渠道 build_outcome，再 merged 成一个结论
+
+        **返回结论而不是"竞品列表 + 失败集合"**：竞品列表为空时，含义完全取决于
+        它旁边那个状态（"查证过确实没有" vs "没查成"），把两者分开传就等于邀请了
+        "只传了列表、忘了传状态"这种错误 —— 而那个错误的后果是每张卡片虚高 12.5 分
+        （见 :attr:`~xhs_pain_miner.models.OpportunityCard.research_status`）。
+        """
+        outcomes: dict[str, ResearchOutcome] = {}
+        named = [c for c in clusters if not c.is_noise]
 
         if not self.settings.research_enabled:
             messages.append(
                 "竞品调研已关闭，「竞品空白度」因子按中性值 0.5 计算 —— 未调研不等于没有竞品。"
             )
-            # ★ 关闭调研时必须把**所有**非噪声簇标记为「没查成」。
+            # ★ 关闭调研时，每个簇的结论必须是 ``unsearchable``（没查过），
+            # 而不是"查证过确实没有竞品"。
             #
-            # 不标记的话，`competitor_gap` 会把空 findings 解读成「查证过，确实
-            # 没有竞品」并返回 1.0 —— 那是机会分里最强的正面信号（比"全部停更"
-            # 的 0.75 还高），而我们一次都没查。每张卡片会因此虚高 12.5 分，
-            # 报告上还会印出"✅ 未发现竞品 —— 查证过，目前没有可查到的成熟实现"。
-            #
+            # 搞错这一条的后果是实测过的：``competitor_gap`` 会把空 findings 解读成
+            # 「查证过，确实没有竞品」并返回 1.0 —— 那是机会分里最强的正面信号
+            # （比"全部停更"的 0.75 还高），而我们一次都没查。每张卡片会因此虚高
+            # 12.5 分，报告上还会印出"✅ 未发现竞品 —— 查证过"。
             # 这正是不变式 3 点名的那个危险实例：把"没查成"当成"没有"。
-            return findings, {c.id for c in clusters if not c.is_noise}
+            return {
+                cluster.id: ResearchOutcome(status="unsearchable", warning=_NOT_SEARCHED_WARNING)
+                for cluster in named
+            }
 
-        named = [c for c in clusters if not c.is_noise]
-        candidates = named[: self.settings.research_max_clusters]
-        if len(candidates) < len(named):
+        candidates_for_research = named[: self.settings.research_max_clusters]
+        over_limit = named[self.settings.research_max_clusters :]
+        if over_limit:
             messages.append(
-                f"竞品调研只覆盖了提及量最高的 {len(candidates)} 个痛点簇"
+                f"竞品调研只覆盖了提及量最高的 {len(candidates_for_research)} 个痛点簇"
                 f"（共 {len(named)} 个），其余簇的空白度按中性值计算。"
                 f"配置 GITHUB_TOKEN 可提高调用配额，或调大 RESEARCH_MAX_CLUSTERS。"
             )
-            # 超出上限的簇同样**没查过**，必须一并标记 —— 与关闭调研同理。
-            failed.update(c.id for c in named[self.settings.research_max_clusters :])
+            # 超出上限的簇同样**没查过**，必须一并标成 unsearchable —— 与关闭调研
+            # 同理，缺省值必须落在保守的一侧。
+            for cluster in over_limit:
+                outcomes[cluster.id] = ResearchOutcome(
+                    status="unsearchable", warning=_NOT_SEARCHED_WARNING
+                )
 
-        for item in candidates:
-            items, warning = research_cluster(
-                item,
-                keyword=keyword,
-                token=self.settings.github_token,
+        # 节流器在**整个运行**的范围里建一次：GitHub 的额度是按"这台机器发出的
+        # 请求"算的，不是按簇算的（理由见 github.SearchPacer）。
+        pacer = github.SearchPacer(token=self.settings.github_token)
+        for cluster in candidates_for_research:
+            outcomes[cluster.id] = self._research_cluster(cluster, keyword, messages, pacer=pacer)
+        return outcomes
+
+    def _research_cluster(
+        self,
+        cluster: PainCluster,
+        keyword: str,
+        messages: list[str],
+        *,
+        pacer: github.SearchPacer,
+    ) -> ResearchOutcome:
+        """单个簇的多渠道调研 —— 路由、判定、出结论。
+
+        所有"没查成"的分支都在这里收敛成 ``ResearchOutcome``，**不生成任何伪造的
+        检索轨迹**：一条不存在的查询（未接入的渠道、模型没给出词）被记成"这次失败"
+        会污染结论的可复核性 —— 用户点开轨迹想核对，看到的却是我们根本没发过的请求。
+        """
+        identity = cluster.label.strip() or cluster.id or "未知簇"
+
+        queries, warning = build_solution_queries(
+            cluster,
+            keyword=keyword,
+            provider=self._get_llm(),
+            max_queries=self.settings.research_max_queries_per_cluster,
+        )
+        if warning is not None:
+            # 生成失败/不可用：警告里已经写明了"该簇的空白度按中性值处理"，
+            # 直接把它当成这个簇的结论。**绝不退回用痛点名去搜** —— 那正是 M1 的
+            # 错误（拿"问题"当"解法"搜，必然 0 命中，而 0 命中会被读成"没有竞品"）。
+            messages.append(warning)
+            return ResearchOutcome(status="unsearchable", warning=warning)
+
+        routed = [query for query in queries if query.channel in _ROUTED_CHANNELS]
+        skipped = sorted({q.channel for q in queries if q.channel not in _ROUTED_CHANNELS})
+        if skipped:
+            messages.append(
+                f"簇「{identity}」有指向**尚未接入**的渠道（{'、'.join(skipped)}）的检索词，"
+                "已跳过 —— 本版本只有 GitHub 与 App Store 两个渠道。"
+                "跳过不等于那些渠道里没有竞品，它们也不参与本次结论。"
             )
-            if warning:
-                messages.append(warning)
-                failed.add(item.id)
-            findings[item.id] = items
-        return findings, failed
+        if not routed:
+            unsearchable = (
+                f"簇「{identity}」没有可路由的检索词（全部指向尚未接入的渠道），"
+                "本次没有查任何渠道；其「竞品空白度」按中性值计 —— 没查过不等于没有竞品。"
+            )
+            messages.append(unsearchable)
+            return ResearchOutcome(status="unsearchable", warning=unsearchable)
+
+        attempts = self._search_channels(routed, pacer=pacer)
+        candidates = [finding for attempt in attempts for finding in attempt.findings]
+
+        # 一次判定拿回全部渠道的结论：按渠道分别判定会让同一个痛点在不同渠道上
+        # 拿到互相矛盾的尺度（同一个项目在 A 渠道算相关、在 B 渠道不算），复核时
+        # 没法解释谁对；成本也会随渠道数线性增长（见 relevance 模块文档）。
+        judgement = judge_relevance(cluster, candidates, provider=self._get_llm())
+        # ★ 判定失败时全部候选留在 ``relevant`` —— 那是一个**保守**的取舍（宁可多
+        # 展示几个链接，也不给出"没有竞品"的结论），但它同时意味着 findings 里可能
+        # 混着不相关的项目。把 ``warning`` 一路带进结论（它写明"这些候选未经判定"）
+        # 是让这个取舍不变成误报的唯一方式；静默丢掉它，等于把一个"不知道"包装成
+        # 一次正常的"查到竞品"，报告上不会有任何地方提醒用户去看一眼。
+        # ``judgement.failed`` 也因此不需要再映射到某种状态：候选留在 findings 里，
+        # 结论就是 ``ok``（"查到竞品"，压低空白度），而警告负责说明它们的成色。
+        kept = {id(finding) for finding in judgement.relevant}
+
+        channel_outcomes: list[ResearchOutcome] = []
+        for channel in _ROUTED_CHANNELS:
+            per_channel = [attempt for attempt in attempts if attempt.query.channel == channel]
+            if not per_channel:
+                continue
+            traces = [
+                QueryTrace(
+                    query=attempt.query.text,
+                    channel=channel,
+                    hits=attempt.hits,
+                    # ``kept`` 必须真填。它是"这条词召回的候选里最终留下了几条"，
+                    # 用户会拿它跟卡片上的竞品列表对照 —— 漏填（恒 0）会出现
+                    # "卡片列着 7 个竞品、轨迹写着保留 0 条"这种自相矛盾的产物，
+                    # 而它偏偏是"结论可逐条复核"这个卖点的门面。
+                    kept=sum(1 for finding in attempt.findings if id(finding) in kept),
+                    error=attempt.error,
+                )
+                for attempt in per_channel
+            ]
+            findings = [
+                finding
+                for attempt in per_channel
+                for finding in attempt.findings
+                if id(finding) in kept
+            ]
+            channel_outcomes.append(build_outcome(traces, findings, subject=identity))
+
+        outcome = channel_outcomes[0]
+        for other in channel_outcomes[1:]:
+            # 保守合并：一个渠道没查成，整体就不能断言"没有竞品"。未接入的渠道
+            # 不在这里出现（见 _ROUTED_CHANNELS），否则它会系统性地抹掉每个
+            # no_competitor。
+            outcome = outcome.merged(other)
+
+        # ★ 警告要按**合并后的处境**筛一遍，不能把各渠道的话直接拼起来。
+        #
+        # 每个渠道的结论是为它自己说的：A 渠道"查证过、没有相关实现"，
+        # B 渠道查到了 3 个竞品 —— 两句并排出现在同一份报告里时自相矛盾，
+        # 而渲染层会照着合并后的结论说"查到竞品"，用户看到的是同一份产物里的
+        # 两句话打架。所以有竞品时，把 `no_competitor` 那句去掉。
+        #
+        # 其余两类照留：它们讲的是结论的**不完整性**（"检索不到" / "这次没查成"），
+        # 合并后有竞品时依然成立 —— 还有渠道没查，竞品列表就可能不全。
+        has_competitors = bool(outcome.findings)
+        warnings = [
+            channel.warning
+            for channel in channel_outcomes
+            if channel.warning and not (has_competitors and channel.status == "no_competitor")
+        ]
+        if judgement.warning is not None:
+            warnings.append(judgement.warning)
+        outcome = replace(outcome, warning=" ".join(warnings) if warnings else None)
+        if outcome.warning:
+            messages.append(outcome.warning)
+        return outcome
+
+    def _search_channels(
+        self,
+        queries: Sequence[SolutionQuery],
+        *,
+        pacer: github.SearchPacer,
+    ) -> list[_ChannelAttempt]:
+        """把检索词逐条发给它所属的渠道，返回每次查询的原始结果。
+
+        渠道是**串行**的（每次请求之间由 :class:`~xhs_pain_miner.research.github.SearchPacer`
+        补足间隔）：GitHub 匿名额度约 10 次/分钟，并发只会一起撞 403，而一次 403
+        会让整个簇的结论退回中性值。
+        """
+        attempts: list[_ChannelAttempt] = []
+        seen: dict[CompetitorSource, set[str]] = {channel: set() for channel in _ROUTED_CHANNELS}
+        for channel in _ROUTED_CHANNELS:
+            for query in [q for q in queries if q.channel == channel]:
+                try:
+                    findings, hits = self._query_channel(query, pacer=pacer)
+                except RuntimeError as exc:
+                    attempts.append(_ChannelAttempt(query=query, error=str(exc)))
+                    # 同一个渠道上失败一次就放弃它剩下的词：限流与断网不会因为是
+                    # 另一个检索词就恢复，继续打只会加深限流、让后面的簇一起失败。
+                    # 其他渠道不受影响 —— 它们失败的原因通常与这个渠道无关。
+                    break
+                fresh: list[CompetitorFinding] = []
+                for finding in findings:
+                    key = finding.url or finding.name
+                    # ★ 单渠道内跨查询按 URL 去重。``build_outcome`` 不做去重
+                    # （去重在 ``merged`` 里，那是跨渠道的事），所以同一个项目被两条
+                    # 检索词同时召回时，不去重就会在卡片上出现两次（实测
+                    # ``护肤`` ∩ ``美妆 成分查询`` 有 2 条重复）。
+                    if key in seen[channel]:
+                        continue
+                    seen[channel].add(key)
+                    fresh.append(finding)
+                attempts.append(_ChannelAttempt(query=query, findings=tuple(fresh), hits=hits))
+        return attempts
+
+    def _query_channel(
+        self, query: SolutionQuery, *, pacer: github.SearchPacer
+    ) -> tuple[list[CompetitorFinding], int]:
+        """执行一次渠道查询，返回 ``(候选, 平台自报命中数)``。
+
+        Raises:
+            RuntimeError: 网络失败 / 限流 / 响应格式异常。**这些都不是"没有竞品"**，
+                必须由调用方转成一条带 ``error`` 的轨迹，让结论退回中性值。
+        """
+        if query.channel == "github":
+            pacer.wait()
+            repos = github.search_repositories(query.text, token=self.settings.github_token)
+            return repos.findings, repos.total_hits
+        if query.channel == "appstore":
+            apps = appstore.search_apps(query.text, country=self.settings.appstore_country)
+            return apps.findings, apps.total_hits
+        raise RuntimeError(
+            f"渠道 {query.channel} 尚未接入，不应被路由到这里 —— "
+            "把它记成「这次没查成」会让未实现冒充成调研失败。"
+        )
 
     def _collect_usage(self, started: float) -> RunCost:
         """合并文本与视觉两条链路的用量。

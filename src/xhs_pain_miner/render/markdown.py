@@ -30,6 +30,7 @@ from collections.abc import Sequence
 from datetime import date, datetime
 
 from xhs_pain_miner.models import CompetitorFinding, MiningResult, OpportunityCard
+from xhs_pain_miner.research.outcome import STATUS_LABELS
 from xhs_pain_miner.scoring.opportunity import FACTOR_LABELS, FACTOR_NAMES, NEUTRAL
 
 MAX_CARDS = 20
@@ -86,26 +87,36 @@ def _ago_text(value: date | datetime | None) -> str:
     return f"{days // 365} 年前"
 
 
-def _gap_is_neutral(card: OpportunityCard) -> bool:
-    """``competitor_gap`` 是否恰好等于中性值（即调研失败）。
-
-    推理依据见 :mod:`~xhs_pain_miner.render.html` 的同名函数：只有调研失败时
-    ``competitor_gap`` 才返回 0.5，因此"没有竞品且空白度为 0.5"就是"没查成"。
-    在 Markdown 里这条同样重要 —— 分享出去的文本更不能把"没查成"说成"没有竞品"。
-    """
-    gap = card.score_breakdown.get("competitor_gap")
-    return gap is not None and abs(float(gap) - NEUTRAL) < 1e-9
-
-
 def _competitor_lines(card: OpportunityCard) -> list[str]:
-    """竞品小节。"""
+    """竞品小节。
+
+    四种结论类别说四句不同的话，判据是卡片上的 ``research_status`` —— 理由与
+    :func:`~xhs_pain_miner.render.html._competitor_verdict` 完全相同，而这里更要紧：
+    Markdown 产物是**要发出去**的那一份，把"检索不到"写成"未发现竞品"会跟着
+    这条文本一起传播出去。
+    """
+    status = card.research_status
     findings: Sequence[CompetitorFinding] = card.competitors
-    if not card.competitors and _gap_is_neutral(card):
-        return [
-            "⚠️ 竞品调研未完成（空白度按中性值 0.5 计）—— 这不代表该方向没有竞品，只是这次没查成。"
-        ]
     if not findings:
-        return ["未发现竞品 —— 查证过，目前没有可查到的成熟实现。"]
+        # 四句话的判据与顺序见 html 的同名函数：先看有没有竞品，再在**没有竞品**的
+        # 那一支里按结论类别区分（手工构造的卡片可能写出不自洽的组合）。
+        if status in ("unsearchable", "failed"):
+            label = _esc(STATUS_LABELS[status])
+            detail = (
+                # 两种成因都要写出来：检索词没返回东西 / 压根没有可用的检索词
+                # （理由见 html 的同名函数 —— "检索不到"不是唯一的成因）。
+                "这不代表该方向没有竞品：可能是这些检索词在平台上没有返回任何东西"
+                "（换个更贴近「用户会去找什么工具」的说法再搜，往往就能搜到），"
+                "也可能是这次没有可用的检索词。"
+                if status == "unsearchable"
+                else "这不代表该方向没有竞品，只是这次没查成。"
+            )
+            return [f"⚠️ {label}（空白度按中性值 {_esc(NEUTRAL)} 计）—— {detail}"]
+        if status == "no_competitor":
+            return [
+                f"✅ {_esc(STATUS_LABELS[status])} —— 平台能搜到内容，但没有与这个痛点相关的实现。"
+            ]
+        return ["本次没有可展示的竞品记录。"]
 
     lines: list[str] = []
     for finding in findings:

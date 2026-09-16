@@ -11,8 +11,11 @@ CLI 测试全部走内置样例后端，不联网、不需要 API Key。
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
+import httpx
 import pytest
 from click.testing import CliRunner
 
@@ -22,6 +25,9 @@ from xhs_pain_miner.config import Settings
 from xhs_pain_miner.llm.base import LLMError, LLMResponse
 from xhs_pain_miner.models import RunCost
 from xhs_pain_miner.pain_miner import normalize_keyword
+from xhs_pain_miner.research import appstore as appstore_module
+from xhs_pain_miner.research import github as github_module
+from xhs_pain_miner.research import query, relevance
 
 _MANAGED_ENV = (
     "LLM_API_KEY",
@@ -129,14 +135,45 @@ def _taxonomy_reply(prompt: str) -> str:
     return json.dumps({"pains": pains, "labels": labels}, ensure_ascii=False)
 
 
+_SOLUTION_QUERIES_JSON = json.dumps(
+    {
+        "queries": [
+            {"text": "美妆 成分查询", "channel": "appstore"},
+            {"text": "cosmetic ingredient lookup", "channel": "github"},
+            {"text": "web clipper", "channel": "chrome"},
+        ]
+    },
+    ensure_ascii=False,
+)
+"""解法检索词 —— 刻意带上一条 **未接入渠道**（chrome）的词。
+
+生产环境里 T1 的提示词会让模型为四个渠道都出词，而本版本只实现了两个。假实现
+必须复现这个形状，否则"未接入的渠道被跳过"这条约束在端到端测试里永远测不到。
+"""
+
+_RELEVANCE_JSON = '{"relevant": [], "rejected": [0, 1]}'
+
+
 class _FakeLLM:
-    """假 LLM —— 按提示词类型返回归纳结果或标注结果。"""
+    """假 LLM —— 按提示词类型返回归纳 / 标注 / 检索词 / 相关性判定结果。
+
+    M2 之后一个簇会走四类提示词，都从同一个 provider 出去，所以这里必须按**提示词
+    的类型**分派。用系统提示词做判据（而不是"回复里有没有某个词"）：系统提示词是
+    各模块自己定义的常量，改措辞时测试跟着一起变，不会静默失配。
+    """
 
     name = "fake"
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        solution_reply: str = _SOLUTION_QUERIES_JSON,
+        relevance_reply: str = _RELEVANCE_JSON,
+    ) -> None:
         self.usage = RunCost()
         self.prompts: list[str] = []
+        self.solution_reply = solution_reply
+        self.relevance_reply = relevance_reply
 
     def complete(self, messages, **kwargs):  # type: ignore[no-untyped-def]
         prompt = messages[-1].content
@@ -144,6 +181,15 @@ class _FakeLLM:
         self.usage.llm_calls += 1
         self.usage.llm_input_tokens += 100
         self.usage.llm_output_tokens += 50
+        joined = "".join(getattr(message, "content", "") for message in messages)
+        if query.SYSTEM_PROMPT in joined:
+            return LLMResponse(
+                text=self.solution_reply, model="fake", input_tokens=100, output_tokens=50
+            )
+        if relevance.SYSTEM_PROMPT in joined:
+            return LLMResponse(
+                text=self.relevance_reply, model="fake", input_tokens=100, output_tokens=50
+            )
         # 归纳阶段的提示词要求输出 pains + labels；标注阶段要求输出单个痛点属性
         text = _taxonomy_reply(prompt) if '"pains"' in prompt else _LABEL_JSON
         return LLMResponse(text=text, model="fake", input_tokens=100, output_tokens=50)
@@ -159,21 +205,26 @@ class _FakeLLM:
         pass
 
 
-def _miner(**setting_overrides: object) -> PainMiner:
+def _miner(*, llm: _FakeLLM | None = None, **setting_overrides: object) -> PainMiner:
     """构造一台全程离线的 PainMiner（假 LLM + 假编码器 + 样例语料）。
 
     ``vlm`` 也要注入：不注入的话 ``--deep`` 会去构造真实 provider 并因缺少
     API Key 失败 —— 那测的就不是流水线，而是"CI 里没有 Key"这件事。
     两个 provider 用各自的实例，与生产路径（文本/视觉两条链路）保持一致。
+
+    ``llm`` 可替换成配置过回复的假模型（竞品调研那几条用例要按提示词类型给出
+    不同回复）；不传则用默认的。
+
+    默认 ``research_enabled=False``：只有明确针对竞品调研的用例才打开它，并把两个
+    渠道的 HTTP 都接到假传输层上 —— 打开调研就会真的发请求，默认值必须是关的。
     """
     settings = _settings(
         collector_backend="fixture",
-        research_enabled=False,
-        **setting_overrides,
+        **{"research_enabled": False, **setting_overrides},
     )
     return PainMiner(
         settings=settings,
-        llm=_FakeLLM(),
+        llm=llm if llm is not None else _FakeLLM(),
         vlm=_FakeLLM(),
         embedder=_FakeEmbedder(),
     )
@@ -331,6 +382,10 @@ class TestPainMinerFacade:
                 "但这次运行根本没查过竞品 —— 它必须是中性值 0.5"
             )
             assert card.research_failed, f"卡片「{card.title}」未标记调研失败"
+            assert card.research_status == "unsearchable", (
+                f"卡片「{card.title}」的结论类别是 {card.research_status} —— "
+                "没查过只能是 unsearchable（渲染层据此说「没查成」，而不是「没有竞品」）"
+            )
             assert not card.competitors
 
     def test_mine_progress_callback_is_called(self):
@@ -864,3 +919,144 @@ class TestSavePathValidation:
             main, ["collect", "-k", "防晒霜", "--backend", "fixture", "-n", "1", "--save", "   "]
         )
         assert result.exit_code == 2, _combined(result)
+
+
+# --------------------------------------------------------------------------- #
+# 竞品调研端到端（打开调研 + 两个渠道的假传输层）
+# --------------------------------------------------------------------------- #
+
+Handler = Callable[[httpx.Request], httpx.Response]
+
+
+def _github_repo(name: str, *, description: str = "解决防晒问题的工具") -> dict[str, Any]:
+    return {
+        "full_name": name,
+        "html_url": f"https://github.com/{name}",
+        "stargazers_count": 120,
+        "pushed_at": "2026-08-01T00:00:00Z",
+        "description": description,
+    }
+
+
+def _appstore_app(name: str) -> dict[str, Any]:
+    return {
+        "trackName": name,
+        "trackViewUrl": f"https://apps.apple.com/cn/app/{name}",
+        "userRatingCount": 900,
+        "currentVersionReleaseDate": "2026-08-01T00:00:00Z",
+        "description": "帮你解决这个问题的 App",
+    }
+
+
+@pytest.fixture
+def research_channels(monkeypatch: pytest.MonkeyPatch):
+    """把两个渠道的 HTTP 都接到假传输层（不联网、不等限速）。"""
+
+    def install(*, github: Handler, appstore: Handler) -> None:
+        monkeypatch.setattr(github_module, "_transport", httpx.MockTransport(github))
+        monkeypatch.setattr(appstore_module, "_transport", httpx.MockTransport(appstore))
+
+    monkeypatch.setattr(github_module, "_sleep", lambda _seconds: None)
+    return install
+
+
+class TestResearchEnabledEndToEnd:
+    """★ 打开竞品调研的整条链路 —— 真正的接线验收。
+
+    这里跑的是 ``mine()``：检索词生成 → 渠道分发 → 相关性判定 → 结论 → 卡片 →
+    产物。前面那些单点用例守的是每一步的边界，这一组守的是它们**连起来**之后
+    用户拿到的东西。
+    """
+
+    def test_cards_carry_competitors_from_both_channels(self, research_channels):
+        research_channels(
+            github=lambda request: httpx.Response(
+                200,
+                json={
+                    "total_count": 2,
+                    "items": [_github_repo(f"a/{request.url.params['q']}")],
+                },
+            ),
+            appstore=lambda request: httpx.Response(
+                200, json={"resultCount": 1, "results": [_appstore_app("成分查询助手")]}
+            ),
+        )
+        llm = _FakeLLM(relevance_reply='{"relevant": [0, 1], "rejected": []}')
+        result = _miner(llm=llm, research_enabled=True).mine("防晒霜", notes_count=20)
+
+        assert result.cards
+        for card in result.cards:
+            assert card.research_status == "ok"
+            assert {finding.source for finding in card.competitors} == {"github", "appstore"}
+            assert card.score_breakdown["competitor_gap"] < 1.0
+
+    def test_zero_hits_everywhere_never_claim_no_competitor(self, research_channels):
+        """★ 0 命中（平台检索不到）不是"没有竞品" —— 空白度必须落回中性值。
+
+        这是 M2 要修的那个假空白：M1 把 0 命中读成"查证过确实没有竞品"，
+        给出空白度 1.0（机会分里最强的正面信号），用户于是去做一个实际很拥挤的
+        方向。这里同时钉住分数、结论类别与告诉用户的那句话。
+        """
+        research_channels(
+            github=lambda request: httpx.Response(200, json={"total_count": 0, "items": []}),
+            appstore=lambda request: httpx.Response(200, json={"resultCount": 0, "results": []}),
+        )
+        result = _miner(llm=_FakeLLM(), research_enabled=True).mine("防晒霜", notes_count=20)
+
+        assert result.cards
+        for card in result.cards:
+            assert card.research_status == "unsearchable"
+            assert card.research_failed is True
+            assert card.score_breakdown["competitor_gap"] == pytest.approx(0.5)
+        assert any("检索不到" in note for note in result.notes)
+
+    def test_unimplemented_channel_words_do_not_downgrade_the_conclusion(self, research_channels):
+        """★ chrome / xhs 的词被跳过，且**没有**因此把结论压回中性值。
+
+        假模型每次都给出 4 条词（其中 chrome 那条永远不该被发出）。若未接入的渠道
+        也被当成"这次没查成"参与合并，每张卡片都会从"查证过没有竞品"（1.0）
+        掉到中性值（0.5）—— 一个必然失败的渠道会系统性抹掉 M2 的正面信号。
+        """
+        research_channels(
+            github=lambda request: httpx.Response(
+                200, json={"total_count": 7, "items": [_github_repo("someone/books")]}
+            ),
+            appstore=lambda request: httpx.Response(
+                200, json={"resultCount": 5, "results": [_appstore_app("无关应用")]}
+            ),
+        )
+        llm = _FakeLLM(relevance_reply='{"relevant": [], "rejected": [0, 1]}')
+        result = _miner(llm=llm, research_enabled=True).mine("防晒霜", notes_count=20)
+
+        assert result.cards
+        for card in result.cards:
+            assert card.research_status == "no_competitor", (
+                f"卡片「{card.title}」的结论是 {card.research_status} —— "
+                "平台搜得到、只是不相关，这正是「查证过确实没有」"
+            )
+            assert card.score_breakdown["competitor_gap"] == 1.0
+        assert not any("web clipper" in prompt for prompt in llm.prompts)
+
+    def test_warning_text_stays_out_of_the_public_payload(self, research_channels):
+        """★ 约束 6：判定失败的警告含 LLM 回复预览，绝不能跟着出网。"""
+        research_channels(
+            github=lambda request: httpx.Response(
+                200, json={"total_count": 3, "items": [_github_repo("a/one")]}
+            ),
+            appstore=lambda request: httpx.Response(
+                200, json={"resultCount": 1, "results": [_appstore_app("成分查询助手")]}
+            ),
+        )
+        leak = "模型今天不想输出 JSON —— 这段是自由文本"
+        result = _miner(llm=_FakeLLM(relevance_reply=leak), research_enabled=True).mine(
+            "防晒霜", notes_count=20
+        )
+
+        assert any(leak in note for note in result.notes), "警告必须先出现在本地产物里"
+        payload = json.dumps(result.to_public_dict(), ensure_ascii=False)
+        assert leak not in payload
+        assert "notes" not in result.to_public_dict()
+        for card in result.cards:
+            card_payload = json.dumps(card.to_public_dict(), ensure_ascii=False)
+            assert leak not in card_payload
+            assert "warning" not in card_payload
