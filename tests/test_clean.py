@@ -281,33 +281,83 @@ class TestDeduplication:
         assert len(units) == 3, f"应为 1 笔记 + 2 条去重后的评论，实际 {len(units)}"
 
     def test_first_occurrence_is_kept(self):
-        """保留**首次出现**的那条 —— 顺序必须稳定可复现。
+        """★ 保留**首次出现**的那条，而不是点赞最高的那条 —— 顺序必须稳定可复现。
 
         若改成保留点赞最高的那条，同一份语料在不同运行里会选出不同的证据，
         证据链就无法逐字比对了。
+
+        **这条测试必须让两条候选在可观测属性上都不同**（跨笔记 + likes 不同 +
+        时间戳不同）：两条候选挂同一篇笔记时，"保留首现"与"保留最高赞"会产出
+        完全一样的结果，把实现改坏也全绿（实测确认过）。
+        时间戳尤其要钉住 —— ``Evidence.created_at`` 是「增长趋势」因子唯一的
+        硬数据来源，证据换成另一条会让该因子的输入跨月漂移。
         """
         corpus = RawCorpus(
             keyword="防晒霜",
-            notes=[_note("n1", title="防晒假白到像糊了面粉")],
+            notes=[
+                _note("n1", title="防晒假白到像糊了面粉"),
+                _note("n2", title="防晒搓泥搓到怀疑人生"),
+            ],
             comments=[
-                _comment("c1", "n1", content=self.REPEATED, likes=1),
-                _comment("c2", "n1", content=self.REPEATED, likes=9999),
+                _comment(
+                    "c1",
+                    "n1",
+                    content=self.REPEATED,
+                    likes=1,
+                    created_at=datetime(2026, 1, 5, tzinfo=TZ),
+                ),
+                _comment(
+                    "c2",
+                    "n2",
+                    content=self.REPEATED,
+                    likes=9999,
+                    created_at=datetime(2026, 6, 5, tzinfo=TZ),
+                ),
             ],
         )
         units = build_units(corpus)
         merged = next(unit for unit in units if unit.text == self.REPEATED)
-        assert merged.source == "comment"
 
-        doubled = RawCorpus(
+        assert merged.source == "comment"
+        assert merged.note_id == "n1", "必须保留首现的那条（n1），而不是点赞最高的 n2"
+        assert merged.created_at == datetime(2026, 1, 5, tzinfo=TZ), (
+            "时间戳必须来自首现那条 —— 它是「增长趋势」因子唯一的硬数据来源"
+        )
+        assert merged.likes == 10_000, "重复项的点赞数仍要并入首条"
+
+        # 调换**笔记顺序**后，"首现"变成另一条，合并结果的归属必须跟着换 ——
+        # 证明保留的确实是"第一个出现的"，而不是别的巧合。
+        #
+        # 注意调的是 notes 而不是 comments 的顺序：``build_units`` 按笔记遍历，
+        # 评论跟着自己的笔记走，所以「首现」由笔记的先后决定。这条语义本身值得
+        # 钉住 —— 它决定了同一份语料两次运行的证据归属是否一致。
+        flipped = RawCorpus(
             keyword="防晒霜",
-            notes=[_note("n1", title="防晒假白到像糊了面粉")],
+            notes=[
+                _note("n2", title="防晒搓泥搓到怀疑人生"),
+                _note("n1", title="防晒假白到像糊了面粉"),
+            ],
             comments=[
-                _comment("c2", "n1", content=self.REPEATED, likes=9999),
-                _comment("c1", "n1", content=self.REPEATED, likes=1),
+                _comment(
+                    "c2",
+                    "n2",
+                    content=self.REPEATED,
+                    likes=9999,
+                    created_at=datetime(2026, 6, 5, tzinfo=TZ),
+                ),
+                _comment(
+                    "c1",
+                    "n1",
+                    content=self.REPEATED,
+                    likes=1,
+                    created_at=datetime(2026, 1, 5, tzinfo=TZ),
+                ),
             ],
         )
-        # 调换顺序后仍是"首现"，但因为两条文本相同，合并结果必须一致
-        assert [u.text for u in build_units(doubled)] == [u.text for u in units]
+        flipped_merged = next(u for u in build_units(flipped) if u.text == self.REPEATED)
+        assert flipped_merged.note_id == "n2", "换了笔记顺序，首现就变成 n2"
+        assert flipped_merged.created_at == datetime(2026, 6, 5, tzinfo=TZ)
+        assert flipped_merged.likes == 10_000
 
     def test_likes_are_merged_not_dropped(self):
         """重复项的点赞数要**并入**首条，而不是随重复项一起丢掉。

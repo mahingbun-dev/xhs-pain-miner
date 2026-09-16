@@ -40,15 +40,15 @@
 ``feasibility``               ``(5 - difficulty) / 4``，即难度 1 → 1.0、5 → 0.0。
 ============================  ====================================================
 
-数据模型的已知缺口（**契约问题，已上报，不在本流修复范围内**）
---------------------------------------------------------------
-* ``PainCluster.difficulty`` 的默认值是 ``3``（不是 ``None``），因此**标注阶段漏跑
-  的簇和"确实难度中等"的簇无法区分** —— 两者都会被算成 ``0.5``。检测手段只剩
-  ``feasibility`` 为空这一条软信号。若要让评分能如实表达"不知道"，该字段应允许
-  ``None``。
+数据模型的演进与容错读法
+------------------------
+* ``PainCluster.difficulty`` 允许 ``None``（"不知道"）。因此**标注阶段漏跑的簇**
+  与**"确实难度中等"的簇**可以区分：前者是 ``None``（取中性值），后者是 ``3``
+  （取 ``0.5``，但那是**有依据的** 0.5）。若该字段退回默认值 ``3``，这两种情况
+  会拿到同一个分数 —— 一个静默的评分错误。
 * 读取 ``Evidence.created_at`` / ``PainCluster.difficulty`` 一律走 ``getattr``：
-  模型层在这两个字段上仍在演进，读取侧保持容错，缺字段时按中性值处理而不是
-  让整份报告崩掉。字段都在时行为与直接访问完全一致。
+  读取侧保持容错，缺字段时按中性值处理而不是让整份报告崩掉。字段都在时行为与
+  直接访问完全一致。
 """
 
 from __future__ import annotations
@@ -684,9 +684,15 @@ def build_cards(
         warnings.append(weight_warning)
 
     failed = set(failed_clusters)
-    # 归一化基准取**全部**簇的最大 size，与 min_size 过滤解耦：调用方调整过滤
-    # 阈值时，已经能进报告的卡片分数不该跟着变（否则两次运行没法对比）。
-    max_size = max((cluster.size for cluster in clusters), default=0)
+    # 归一化基准取**参与机会评估**的簇的最大 size：
+    # * 与 min_size 过滤解耦 —— 调用方调整过滤阈值时，已经能进报告的卡片分数
+    #   不该跟着变（否则两次运行没法对比）。
+    # * 但必须排除噪声桶 —— 它已被挡在卡片之外（见下面 selected 的过滤条件），
+    #   再拿它当基准会让「未归类文本越多 → 所有真实痛点的提及量分越低」，
+    #   等于用分类质量差去惩罚真实痛点。提及次数是本产品的核心指标，
+    #   它的基准只能来自真实痛点自己。
+    evaluated = [c for c in clusters if include_noise or not c.is_noise]
+    max_size = max((cluster.size for cluster in evaluated), default=0)
     selected = [
         cluster
         for cluster in clusters

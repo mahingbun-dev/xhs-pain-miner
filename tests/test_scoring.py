@@ -63,6 +63,7 @@ def cluster(
     feasibility: str = "",
     summary: str = "涂完像戴了面具",
     category: str = "结果不达预期",
+    is_noise: bool = False,
 ) -> PainCluster:
     return PainCluster(
         id=id_,
@@ -75,6 +76,7 @@ def cluster(
         stage=stage,  # type: ignore[arg-type]
         difficulty=difficulty,
         feasibility=feasibility,
+        is_noise=is_noise,
     )
 
 
@@ -595,6 +597,49 @@ class TestBuildCards:
             by_id["tiny"].score_breakdown["mention_volume"]
             < by_id["mid"].score_breakdown["mention_volume"]
             < 1.0
+        )
+
+    def test_noise_bucket_does_not_dilute_mention_volume(self):
+        """★ 噪声桶不得充当提及量的归一化基准。
+
+        噪声桶（未归类文本）常常是全语料最大的簇，但它已被挡在卡片之外。拿它当
+        基准会让「未归类文本越多 → 所有真实痛点的提及量分越低」，等于用**分类
+        质量差**去惩罚真实痛点 —— 而同一个桶连卡片都不出。提及次数是本产品的
+        核心指标，它的基准只能来自真实痛点自己。
+        """
+        clusters = [
+            cluster(id_="noise", label="", size=500, is_noise=True),
+            cluster(id_="real", size=100),
+            cluster(id_="mid", size=50),
+        ]
+        cards, _ = build_cards(clusters, findings_by_cluster={}, keyword="防晒霜")
+        by_id = {card.pain.id: card for card in cards}
+
+        assert "noise" not in by_id, "噪声桶不该出卡片"
+        assert by_id["real"].score_breakdown["mention_volume"] == 1.0, (
+            "最大的**真实**痛点必须拿满分 —— 噪声桶不该稀释它"
+        )
+        assert by_id["mid"].score_breakdown["mention_volume"] == pytest.approx(
+            mention_volume(clusters[2], max_size=100)
+        )
+
+    def test_noise_bucket_is_a_baseline_once_it_is_included(self):
+        """反向守卫：``include_noise=True`` 时噪声桶确实进卡片，那它就该参与基准。
+
+        上一条不能宽到把这种情况一起排除 —— 它进了报告，就是参与评估的簇。
+        """
+        clusters = [
+            cluster(id_="noise", label="", size=500, is_noise=True),
+            cluster(id_="real", size=100),
+        ]
+        cards, _ = build_cards(
+            clusters, findings_by_cluster={}, keyword="防晒霜", include_noise=True
+        )
+        by_id = {card.pain.id: card for card in cards}
+
+        assert by_id["noise"].score_breakdown["mention_volume"] == 1.0
+        assert by_id["real"].score_breakdown["mention_volume"] == pytest.approx(
+            mention_volume(clusters[1], max_size=500)
         )
 
     def test_findings_are_routed_by_cluster_id(self):

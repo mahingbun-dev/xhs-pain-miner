@@ -534,6 +534,68 @@ class TestDegradation:
         assert cluster.sentiment == 0.0
         assert cluster.stage == "stable"
 
+    def test_noise_bucket_is_never_named(self):
+        """★ 噪声桶（未归类文本）**不参与命名** —— 它是兜底桶，不是某个真实痛点。
+
+        给它起名字会让它冒充一个可做的产品方向（实测产出「解决「其他痛点」的
+        工具」这种卡片，并与真实方向撞名），而且这个假名字会随
+        :meth:`~xhs_pain_miner.models.OpportunityCard.to_public_dict` 进上传载荷。
+
+        这条回归**修过一次却零守卫**：把 ``label_clusters`` 里的噪声过滤去掉，
+        全套测试仍然全绿。它守的是一个会污染交付物的行为，必须钉住。
+        """
+        noise = make_cluster(1, label="")
+        noise.is_noise = True
+        real = make_cluster(2, label="")
+
+        warnings = label_clusters([noise, real], provider=FakeProvider(_respond_by_marker))
+
+        assert noise.label == "", "噪声桶必须保持无名"
+        assert not noise.label.startswith("<"), "也不许退化成占位名冒充痛点"
+        assert noise.summary == "", "噪声桶不该拿到摘要"
+        assert real.label == "痛点2", "真实痛点必须照常被命名"
+        assert warnings == [], "噪声桶根本不该被送去命名，自然也不该产生失败警告"
+
+    # ---------------------------------------------------- 降级文案必须属实 --
+
+    def test_keep_labels_failure_keeps_name_and_says_so(self):
+        """★ ``keep_labels=True`` 且簇上已有名字时，降级**不写占位名**，警告就不许说写了。
+
+        这是默认分类路径的常态：名字来自归纳阶段（一次**已经成功**的调用），
+        标注失败只影响情感与难度。旧实现无条件输出"已降级为占位名"，等于让报告
+        **系统性地**指向一个并不存在的"待命名方向" —— 降级可以发生，但不许谎报
+        降级的内容。
+        """
+        cluster = make_cluster(1, label="假白泛白")
+
+        def boom(messages: Sequence[Message]) -> str:
+            raise LLMError("429 限流")
+
+        warnings = label_clusters([cluster], provider=FakeProvider(boom), keep_labels=True)
+
+        assert cluster.label == "假白泛白", "归纳阶段的名字必须保住"
+        assert len(warnings) == 1
+        assert "已降级为占位名" not in warnings[0], "没有写占位名就不许说写了"
+        assert "假白泛白" in warnings[0], "要说清是哪个痛点降级了"
+        assert "情感与难度未知" in warnings[0]
+        assert "LLMError" in warnings[0] and "限流" in warnings[0]
+
+    def test_keep_labels_failure_without_name_still_writes_placeholder(self):
+        """反向守卫：``keep_labels=True`` 但簇上**没有**名字时，占位名照写、文案照说。
+
+        归纳失败降级到聚类走的正是这条路（簇是空名），此时确实丢了名字 ——
+        上一条测试不能宽到把这种情况也一起放过。
+        """
+        cluster = make_cluster(1, label="")
+
+        def boom(messages: Sequence[Message]) -> str:
+            raise LLMError("超时")
+
+        warnings = label_clusters([cluster], provider=FakeProvider(boom), keep_labels=True)
+
+        assert cluster.label == DEGRADED_LABEL_TEMPLATE.format(index=1)
+        assert "已降级为占位名" in warnings[0]
+
     def test_placeholder_index_matches_cluster_position(self):
         clusters = make_clusters(4)
 

@@ -421,7 +421,7 @@ def _apply_label(cluster: PainCluster, label: ClusterLabel, *, keep_labels: bool
     cluster.feasibility = label.feasibility
 
 
-def _degrade(cluster: PainCluster, index: int, *, keep_labels: bool) -> None:
+def _degrade(cluster: PainCluster, index: int, *, keep_labels: bool) -> bool:
     """命名失败时的降级：占位名 + 中性值。
 
     ``label`` 是结论字段，会随众包上传载荷离开本机（不变式 5），因此这里
@@ -436,8 +436,14 @@ def _degrade(cluster: PainCluster, index: int, *, keep_labels: bool) -> None:
         keep_labels: 保留簇上**已有的非空**名字 —— 分类路径下名字来自归纳阶段
             （一次**已经成功**的调用），把它换成占位名是净损失。簇上没有名字时
             照常写占位名，理由同 :func:`_apply_label`。
+
+    Returns:
+        **本次是否真的写了占位名**。调用方必须据此生成警告文案 —— 两种降级的
+        后果完全不同（一个丢了名字，一个只丢了情感与难度），
+        见 :func:`_degrade_message`。
     """
-    if not (keep_labels and cluster.label):
+    wrote_placeholder = not (keep_labels and cluster.label)
+    if wrote_placeholder:
         cluster.label = DEGRADED_LABEL_TEMPLATE.format(index=index)
         cluster.summary = ""
         cluster.category = ""
@@ -445,6 +451,30 @@ def _degrade(cluster: PainCluster, index: int, *, keep_labels: bool) -> None:
     cluster.stage = "stable"
     cluster.difficulty = None
     cluster.feasibility = ""
+    return wrote_placeholder
+
+
+def _degrade_message(
+    cluster: PainCluster, index: int, *, exc: BaseException, wrote_placeholder: bool
+) -> str:
+    """拼出**与实际发生的事相符**的降级警告。
+
+    两种降级的后果完全不同，必须说成两句不同的话：
+
+    * 写了占位名 —— 这个痛点**没有名字了**，用户在卡片上只能看到"待命名方向"。
+    * 保住了名字（``keep_labels=True`` 且簇上已有归纳阶段的真名）—— 名字还在，
+      只是**情感与难度未知**。分类路径（默认）恒为这一种。
+
+    之前这里无条件输出"已降级为占位名"，而默认路径上根本不会写占位名 ——
+    **报告在系统性地说不成立的话**，用户会去找一个并不存在的"待命名方向"。
+    降级可以发生，但不许谎报降级的内容。
+    """
+    detail = f"{type(exc).__name__}: {exc}"
+    if wrote_placeholder:
+        return f"簇 #{index} 标注失败，已降级为占位名：{detail}"
+    # label 是 LLM 生成的痛点名（会压平空白，避免把换行带进单行日志）
+    name = " ".join(cluster.label.split())
+    return f"簇 #{index}（{name}）标注失败，痛点名已保留，但情感与难度未知：{detail}"
 
 
 def label_clusters(
@@ -469,7 +499,9 @@ def label_clusters(
         progress: 进度回调 ``(阶段名, 完成比例)``。
 
     Returns:
-        警告信息列表（如 ``["簇 #3 标注失败，已降级为占位名：RuntimeError: ..."]``）。
+        警告信息列表。文案**随实际发生的降级而不同**（见 :func:`_degrade_message`）：
+        ``["簇 #3 标注失败，已降级为占位名：RuntimeError: ..."]``
+        或 ``["簇 #3（假白）标注失败，痛点名已保留，但情感与难度未知：..."]``。
         **降级必须出现在返回值里**，最终会被写进 :attr:`MiningResult.notes`
         呈现给用户 —— 静默降级会让用户以为看到的是完整结果。
 
@@ -517,13 +549,18 @@ def label_clusters(
                 result = future.result()
             except Exception as exc:  # noqa: BLE001 —— 单个簇的失败不该中断整批
                 # 不重试：限流状态下重试只会加深限流，快速放弃并把失败如实上报
+                wrote_placeholder = _degrade(cluster, index + 1, keep_labels=keep_labels)
                 warnings.append(
                     (
                         index,
-                        f"簇 #{index + 1} 标注失败，已降级为占位名：{type(exc).__name__}: {exc}",
+                        _degrade_message(
+                            cluster,
+                            index + 1,
+                            exc=exc,
+                            wrote_placeholder=wrote_placeholder,
+                        ),
                     )
                 )
-                _degrade(cluster, index + 1, keep_labels=keep_labels)
             else:
                 _apply_label(cluster, result, keep_labels=keep_labels)
 
