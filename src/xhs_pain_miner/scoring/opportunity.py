@@ -642,6 +642,10 @@ def build_card(
         # 评分侧哪天在别处也返回中性值（实测"2 个零 star 的活跃竞品"恰好也是 0.5），
         # 报告就会多印一句"本次调研未完成"。结论的类别只能由结论自己说。
         research_status=research.status,
+        # 检索轨迹与"未经判定"标记同理，都是**结论自带**的信息：「结论可逐条复核」
+        # 这个卖点靠前者落地，「这些竞品没验过」靠后者说清。
+        research_queries=research.queries,
+        research_judgement_failed=research.judgement_failed,
     )
 
 

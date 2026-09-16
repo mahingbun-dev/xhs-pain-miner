@@ -264,6 +264,13 @@ a:hover{text-decoration:underline}
 .comp-gap{margin:6px 0 0;font-size:12.5px;color:var(--muted);word-break:break-word}
 .stale{color:var(--high);font-weight:600}
 .verdict{margin:10px 0 0;font-size:12.5px;line-height:1.55;color:var(--muted)}
+.traces{margin-top:8px;font-size:12px;color:var(--muted)}
+.traces summary{cursor:pointer;color:var(--brand);font-weight:600}
+.traces ul{margin:7px 0 0;padding-left:18px}
+.traces li{margin:3px 0;word-break:break-word}
+.traces code{background:var(--bg);border-radius:4px;padding:1px 5px;font-size:11.5px}
+.traces li span{margin-left:6px}
+.traces .failed{color:var(--high)}
 .empty{margin:0;font-size:12.5px;color:var(--muted);background:var(--bg);
   border:1px dashed var(--line-strong);border-radius:10px;padding:11px 13px}
 .caliber{margin-top:16px;border-top:1px dashed var(--line);padding-top:10px;
@@ -423,9 +430,19 @@ def _competitor_verdict(card: OpportunityCard) -> str:
                 "有人验证过需求，但市场现在是空的。进场前请确认它为什么停下。</p>"
             )
         hottest = max((finding.stars or 0) for finding in active)
-        # 有竞品却仍要提示"结果可能不完整"的情形只剩一种：这个簇的调研没有收全
-        # （见 research_status 的说明）。判据走派生属性，与评分侧是同一条不变式。
-        partial = "（本次调研未完成，结果可能不完整）" if card.research_failed else ""
+        # 有竞品却仍要提示"结果可能不完整"的情形有两种，**都必须说**：
+        #   * ``research_failed`` —— 还有渠道没查成，清单可能不全；
+        #   * ``research_judgement_failed`` —— 这些竞品**根本没验过**相关性
+        #     （判定失败时候选被全部保留，保守取舍）。后者此前到不了卡片：
+        #     有 findings ⇒ 状态必是 ``ok`` ⇒ ``research_failed`` 恒为 False，
+        #     于是"未经判定"只留在运行提示里，而卡片和一次正常判定长得一模一样。
+        partial = (
+            "（本次调研未完成，结果可能不完整）"
+            if card.research_failed or card.research_judgement_failed
+            else ""
+        )
+        if card.research_judgement_failed:
+            partial = "（**这些竞品未经相关性判定**，是候选全量保留的结果，请点开自行判断）"
         return (
             f'<p class="verdict">🔧 {_esc(len(active))} 个竞品仍在活跃维护'
             f"（共查到 {_esc(len(findings))} 个，最热 {_esc(hottest)}★）—— "
@@ -449,13 +466,51 @@ def _competitor_verdict(card: OpportunityCard) -> str:
             f"{_num(NEUTRAL, 1)} 计，{detail}</p>"
         )
     if status == "no_competitor":
+        # 有轨迹才敢说"见下方" —— 手工构造的卡片可能没有，那时这句话就是空头承诺
+        hint = "（检索轨迹见下方，可逐条复核）" if card.research_queries else ""
         return (
             f'<p class="verdict">✅ {_esc(STATUS_LABELS[status])} —— '
-            "平台能搜到内容，但没有与这个痛点相关的实现（检索轨迹见运行提示）。</p>"
+            f"平台能搜到内容，但没有与这个痛点相关的实现{hint}。</p>"
         )
     # ``ok`` 却没有竞品 —— 只有手工构造的卡片会这样（classify_status 产不出它）。
     # 此时说"查证过确实没有"是没有依据的断言，如实说没有记录即可。
     return '<p class="verdict">本次没有可展示的竞品记录。</p>'
+
+
+def _render_traces(card: OpportunityCard) -> str:
+    """检索轨迹 —— 「结论可逐条复核」这个卖点的落地。
+
+    它回答的是"这个结论是怎么得出来的"：实际搜了什么词、发给了哪个平台、平台回了
+    几条、最后留了几条。**没有它，一个「查证过，没有相关竞品」无法被质疑** ——
+    而"能被质疑"正是本产品对"免费的 LLM 摘要"的正面防守。
+
+    默认**收起**（``<details>``）：多数用户不会逐条复核，但它必须**存在且可点开**，
+    否则结论文案里那句"可逐条复核"就是一句空话。
+
+    检索词是 LLM 生成的自由文本。它出现在这里（本地产物）是刻意的，而**不出现在
+    ``to_public_dict()`` 里**也是刻意的 —— 见 :attr:`OpportunityCard.research_queries`。
+    """
+    if not card.research_queries:
+        return ""
+
+    items: list[str] = []
+    for trace in card.research_queries:
+        if trace.succeeded:
+            detail = f"命中 {trace.hits} 条 · 保留 {trace.kept} 条"
+            cls = ""
+        else:
+            # 失败的查询必须留下 —— 它正是"这次没查成"的证据，藏起来就等于
+            # 把结论说得比实际更确定
+            detail = f"未查成：{trace.error}"
+            cls = ' class="failed"'
+        items.append(
+            f"<li{cls}><code>{_esc(trace.channel)}</code> "
+            f"「{_esc(trace.query)}」<span>{_esc(detail)}</span></li>"
+        )
+    return (
+        '<details class="traces"><summary>检索轨迹（可逐条复核）</summary>'
+        f"<ul>{''.join(items)}</ul></details>"
+    )
 
 
 def _render_competitors(card: OpportunityCard) -> str:
@@ -486,7 +541,8 @@ def _render_competitors(card: OpportunityCard) -> str:
     # 没有调研记录时只留结论那句话 —— 空态框和结论说的是同一件事，重复只会稀释重点
     body = f'<ul class="comps">{"".join(rows)}</ul>' if rows else ""
     return (
-        f'<section><h3 class="col-title">竞品调研</h3>{body}{_competitor_verdict(card)}</section>'
+        f'<section><h3 class="col-title">竞品调研</h3>{body}'
+        f"{_competitor_verdict(card)}{_render_traces(card)}</section>"
     )
 
 

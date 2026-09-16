@@ -545,6 +545,16 @@ class TestUnsearchableIsNotNoCompetitor:
 
         assert outcome.status == "unsearchable"
         assert outcome.research_failed is True
+        # ★ 合并结论已不是 no_competitor，github 那句「查证过、没有相关实现」必须
+        # 被筛掉。否则同一份产物里一句说"查证过确实没有"、另一句（卡片）说"检索
+        # 不到、无法判断"，而后者才是合并后的结论。
+        #
+        # 筛除条件用 ``bool(outcome.findings)`` 写会漏掉这一路 —— 此路**没有**
+        # findings（github 唯一那条候选被判定拒绝），但结论已经被 `merged` 的
+        # 保守规则降到 `unsearchable` 了。判据必须是合并后的 status。
+        assert "查证过" not in (outcome.warning or ""), (
+            "合并结论是「无法判断」时，不能同时保留「查证过确实没有」这句话"
+        )
 
 
 # --------------------------------------------------------------------------- #

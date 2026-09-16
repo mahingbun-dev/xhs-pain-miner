@@ -87,6 +87,28 @@ def _ago_text(value: date | datetime | None) -> str:
     return f"{days // 365} 年前"
 
 
+def _trace_lines(card: OpportunityCard) -> list[str]:
+    """检索轨迹 —— 「结论可逐条复核」的落地（理由见 html 的同名函数）。
+
+    它回答的是"这个结论是怎么得出来的"：搜了什么词、发给了哪个平台、平台回了几条、
+    最后留了几条。没有它，「查证过，没有相关竞品」这个结论无法被质疑 —— 而
+    Markdown 是**要发出去**的那一份，读它的人更没法自己去核。
+    """
+    if not card.research_queries:
+        return []
+    lines = ["", "**检索轨迹**（可逐条复核）", ""]
+    for trace in card.research_queries:
+        detail = (
+            f"命中 {trace.hits} 条 · 保留 {trace.kept} 条"
+            if trace.succeeded
+            # 失败的查询必须留下 —— 它正是"这次没查成"的证据，藏起来就等于
+            # 把结论说得比实际更确定
+            else f"未查成：{trace.error}"
+        )
+        lines.append(f"- `{_esc(trace.channel)}` 「{_esc(trace.query)}」 {detail}")
+    return lines
+
+
 def _competitor_lines(card: OpportunityCard) -> list[str]:
     """竞品小节。
 
@@ -111,12 +133,16 @@ def _competitor_lines(card: OpportunityCard) -> list[str]:
                 if status == "unsearchable"
                 else "这不代表该方向没有竞品，只是这次没查成。"
             )
-            return [f"⚠️ {label}（空白度按中性值 {_esc(NEUTRAL)} 计）—— {detail}"]
+            return [
+                f"⚠️ {label}（空白度按中性值 {_esc(NEUTRAL)} 计）—— {detail}",
+                *_trace_lines(card),
+            ]
         if status == "no_competitor":
             return [
-                f"✅ {_esc(STATUS_LABELS[status])} —— 平台能搜到内容，但没有与这个痛点相关的实现。"
+                f"✅ {_esc(STATUS_LABELS[status])} —— 平台能搜到内容，但没有与这个痛点相关的实现。",
+                *_trace_lines(card),
             ]
-        return ["本次没有可展示的竞品记录。"]
+        return ["本次没有可展示的竞品记录。", *_trace_lines(card)]
 
     lines: list[str] = []
     for finding in findings:
@@ -134,6 +160,21 @@ def _competitor_lines(card: OpportunityCard) -> list[str]:
             parts.append("最后活跃时间未知")
         gap = f"：{_esc(finding.gap_notes)}" if finding.gap_notes else ""
         lines.append(f"- {_link(finding.url, finding.name)} — {' · '.join(parts)}{gap}")
+
+    # 「这些竞品没验过」必须出现在**卡片自己**的小节里，不能只留在运行提示里：
+    # 判定失败时候选被全部保留（保守取舍），卡片会与一次正常判定**长得一模一样**，
+    # 用户会把一次 LLM 抖动当成"这个方向真的已经有这些竞品"—— 那正是 M2 验收门
+    # 要抓的误报。
+    if card.research_judgement_failed:
+        lines.append(
+            "⚠️ **这些竞品未经相关性判定**（本次判定失败，候选被全量保留）—— "
+            "它们不一定真的与这个痛点相关，请点开自行判断，"
+            "也不要据此认为这个方向已经有人做了。"
+        )
+    elif card.research_failed:
+        lines.append("（本次调研未完成，结果可能不完整）")
+
+    lines.extend(_trace_lines(card))
     return lines
 
 

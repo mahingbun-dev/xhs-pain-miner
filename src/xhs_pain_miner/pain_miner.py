@@ -676,7 +676,17 @@ class PainMiner:
                 for finding in attempt.findings
                 if id(finding) in kept
             ]
-            channel_outcomes.append(build_outcome(traces, findings, subject=identity))
+            channel_outcomes.append(
+                build_outcome(
+                    traces,
+                    findings,
+                    subject=identity,
+                    # 判定失败时上面那条 `kept` 会把**全部**候选都算成"保留"（因为
+                    # 它们确实都在 relevant 里）。结论必须把"这些其实没验过"带出去 ——
+                    # 否则一次 LLM 抖动在卡片上与一次正常判定长得一模一样。
+                    judgement_failed=judgement.failed,
+                )
+            )
 
         outcome = channel_outcomes[0]
         for other in channel_outcomes[1:]:
@@ -685,20 +695,26 @@ class PainMiner:
             # no_competitor。
             outcome = outcome.merged(other)
 
-        # ★ 警告要按**合并后的处境**筛一遍，不能把各渠道的话直接拼起来。
+        # ★ 筛除条件必须按**合并后的结论**判断，而不是"有没有竞品"。
         #
         # 每个渠道的结论是为它自己说的：A 渠道"查证过、没有相关实现"，
         # B 渠道查到了 3 个竞品 —— 两句并排出现在同一份报告里时自相矛盾，
         # 而渲染层会照着合并后的结论说"查到竞品"，用户看到的是同一份产物里的
-        # 两句话打架。所以有竞品时，把 `no_competitor` 那句去掉。
+        # 两句话打架。
+        #
+        # 判据用 ``outcome.status`` 而非 ``bool(outcome.findings)``：后者漏掉了
+        # 一路 —— A 渠道查证过没有 + B 渠道**没查成**时没有 findings，但
+        # ``merged`` 的保守规则已把结论降为 ``unsearchable``（卡片会说"该渠道
+        # 检索不到，无法判断"）。此时 A 那句"查证过确实没有"同样是假的：该渠道
+        # 明明返回过内容。
         #
         # 其余两类照留：它们讲的是结论的**不完整性**（"检索不到" / "这次没查成"），
         # 合并后有竞品时依然成立 —— 还有渠道没查，竞品列表就可能不全。
-        has_competitors = bool(outcome.findings)
         warnings = [
             channel.warning
             for channel in channel_outcomes
-            if channel.warning and not (has_competitors and channel.status == "no_competitor")
+            if channel.warning
+            and not (outcome.status != "no_competitor" and channel.status == "no_competitor")
         ]
         if judgement.warning is not None:
             warnings.append(judgement.warning)

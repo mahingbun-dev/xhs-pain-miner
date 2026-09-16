@@ -77,11 +77,28 @@ class TestClassifyStatus:
         """压根没有查询词（比如降级簇）—— 没查过，不是"查了没成"。"""
         assert classify_status([], []) == "unsearchable"
 
-    def test_one_success_among_failures_decides(self):
-        """部分失败时按**成功的那些**判定 —— 失败不该吞掉已经拿到的事实。"""
-        assert classify_status([failed_trace(), empty_trace()], []) == "unsearchable"
+    def test_partial_failure_blocks_the_claim(self):
+        """★ 有查询**没查成**时不能断言「没有竞品」—— 那次里可能正躺着竞品。
+
+        缺了这条会产出**自相矛盾**的结论：失败轨迹自己的文案写着"该簇的竞品空白度
+        必须按中性值处理"，而结论给出的正是 1.0、报告印「✅ 查证过，没有相关
+        竞品」。跨渠道有 ``ResearchOutcome.merged`` 挡着（一个渠道没查成就不断言），
+        同渠道内原本没有 —— 同一条不变式的缺口。
+
+        这条路径**可达**：``_search_channels`` 在渠道内首次失败即放弃（避免加深
+        限流），所以"第一条词查到、第二条被限流"正是限流随运行累积时的常见形态。
+        实测后果：卡片空白度 1.0，而保守取值应为 0.5，机会分虚高 12.5 分。
+
+        变异提示：去掉 ``classify_status`` 里 ``len(succeeded) < len(queries)``
+        那条判断，这条测试必须变红。
+        """
         hits = QueryTrace(query="notes export", channel="github", hits=12, kept=0)
-        assert classify_status([failed_trace(), hits], []) == "no_competitor"
+        assert classify_status([failed_trace(), empty_trace()], []) == "unsearchable"
+        assert classify_status([failed_trace(), hits], []) == "unsearchable", (
+            "有一条查询没查成，就不能说「查证过确实没有」"
+        )
+        # 全部查询都成功时，才允许下这个断言
+        assert classify_status([hits, empty_trace()], []) == "no_competitor"
 
     def test_findings_win_over_everything(self):
         """留下了相关竞品就是 ok，无论其它查询是失败还是空手而归。"""
@@ -188,6 +205,31 @@ class TestMerged:
         merged = left.merged(right)
         assert "左边没查成" in (merged.warning or "")
         assert "右边也失败" in (merged.warning or "")
+
+    def test_judgement_failure_propagates(self):
+        """★ 任一渠道的判定没做成，整个结论的竞品清单就都是"未经判定"的。
+
+        少了这条传播，A 渠道正常判定、B 渠道判定失败时，合并结论会声称 ``ok``
+        而把"没验过"这件事丢掉 —— 卡片上就与一次正常判定**长得一模一样**。
+        """
+        clean = ResearchOutcome(status="ok", findings=(finding("a"),))
+        failed = ResearchOutcome(status="ok", findings=(finding("b"),), judgement_failed=True)
+
+        assert clean.merged(clean).judgement_failed is False
+        assert clean.merged(failed).judgement_failed is True
+        assert failed.merged(clean).judgement_failed is True
+
+
+class TestJudgementFailedFlag:
+    def test_build_outcome_carries_it(self):
+        outcome = build_outcome([empty_trace()], [finding()], subject="防晒", judgement_failed=True)
+        assert outcome.judgement_failed is True
+
+    def test_build_outcome_defaults_to_false(self):
+        """默认必须是"判定正常"吗？—— 是：这个标记说的是"发生了什么"，
+        不是"保守起见说什么"。判定没失败却说失败，只会让提示变成噪音，
+        最终人人忽略它。"""
+        assert build_outcome([empty_trace()], [], subject="防晒").judgement_failed is False
 
 
 # --------------------------------------------------------------------------- #

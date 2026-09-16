@@ -18,6 +18,7 @@ from xhs_pain_miner.models import (
     MiningResult,
     OpportunityCard,
     PainCluster,
+    QueryTrace,
     RawComment,
     RawCorpus,
     RawNote,
@@ -164,6 +165,25 @@ class TestOpportunityCard:
         card = self._card()
         card.research_status = "unsearchable"
         assert card.to_public_dict()["research_status"] == "unsearchable"
+
+    def test_public_dict_keeps_out_the_search_traces(self):
+        """★ 检索轨迹**不进**上传载荷 —— 与 ``research_status`` 刚好相反的分类。
+
+        轨迹里的检索词是 **LLM 生成的自由文本**，而生成它的提示词里带了用户原话
+        （模型可能回抄）。所以它属于"必须先过 :func:`find_verbatim_overlap`
+        才能出网"的那一类，**不能**像 ``research_status`` / ``description``
+        那样直接加进白名单。
+
+        用一条"检索词就是用户原话"的轨迹来钉：它一旦漏进载荷，这条测试立刻变红。
+        """
+        card = self._card()
+        card.research_queries = (
+            QueryTrace(query=SENSITIVE_TEXT, channel="github", hits=3, kept=0),
+        )
+        payload = card.to_public_dict()
+
+        assert "research_queries" not in payload
+        assert SENSITIVE_TEXT not in str(payload)
 
     def test_default_research_status_is_conservative(self):
         """★ 默认值只能落在"没查成"那一侧。

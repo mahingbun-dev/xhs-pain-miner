@@ -22,6 +22,7 @@ from xhs_pain_miner.models import (
     MiningResult,
     OpportunityCard,
     PainCluster,
+    QueryTrace,
     ResearchStatus,
     RunCost,
 )
@@ -76,6 +77,8 @@ def make_card(
     score_breakdown: dict[str, float] | None = None,
     feasibility: str = "个人可做 / 1-2 周",
     research_status: ResearchStatus = "no_competitor",
+    research_queries: tuple[QueryTrace, ...] = (),
+    research_judgement_failed: bool = False,
 ) -> OpportunityCard:
     """造一张卡片。
 
@@ -100,6 +103,8 @@ def make_card(
         },
         feasibility=feasibility,
         research_status=research_status,
+        research_queries=research_queries,
+        research_judgement_failed=research_judgement_failed,
     )
 
 
@@ -640,3 +645,109 @@ class TestMarkdownLayout:
         markdown = render_markdown(make_result(notes=["VLM 分析缺失"]))
         assert "运行提示" in markdown
         assert "VLM 分析缺失" in markdown
+
+
+# --------------------------------------------------------------------------- #
+# 检索轨迹 —— 「结论可逐条复核」的落地
+# --------------------------------------------------------------------------- #
+
+
+class TestResearchTraces:
+    """报告里必须看得到"这个结论是怎么得出来的"。
+
+    M2 之前，结论文案写着"以上结论附带完整检索轨迹，可逐条复核"，而产物里
+    根本没有轨迹 —— 一句写进交付物的空头承诺。轨迹是"结论可被质疑"的唯一入口，
+    而"能被质疑"正是本产品对"免费的 LLM 摘要"的正面防守。
+    """
+
+    TRACES = (
+        QueryTrace(query="美妆 成分查询", channel="appstore", hits=9, kept=0),
+        QueryTrace(query="cosmetic ingredient lookup", channel="github", hits=12, kept=1),
+    )
+
+    def test_markdown_lists_every_query_with_hits_and_kept(self):
+        card = make_card(research_queries=self.TRACES)
+        markdown = render_markdown(make_result(cards=[card]))
+
+        assert "检索轨迹" in markdown
+        for trace in self.TRACES:
+            assert trace.query in markdown, f"轨迹里少了「{trace.query}」"
+        assert "命中 9 条 · 保留 0 条" in markdown
+        assert "命中 12 条 · 保留 1 条" in markdown
+
+    def test_html_lists_every_query_with_hits_and_kept(self):
+        card = make_card(research_queries=self.TRACES)
+        document = render_html(make_result(cards=[card]))
+
+        assert "检索轨迹" in document
+        for trace in self.TRACES:
+            assert trace.query in document
+        assert "命中 9 条 · 保留 0 条" in document
+
+    def test_failed_query_is_shown_not_hidden(self):
+        """★ 失败的查询必须留下 —— 它正是"这次没查成"的证据。
+
+        把它藏起来，结论就说得比实际更确定了。
+        """
+        card = make_card(
+            research_status="failed",
+            research_queries=(QueryTrace(query="护肤", channel="appstore", error="HTTP 429"),),
+        )
+        markdown = render_markdown(make_result(cards=[card]))
+        document = render_html(make_result(cards=[card]))
+
+        assert "未查成" in markdown and "429" in markdown
+        assert "未查成" in document and "429" in document
+
+    def test_no_queries_means_no_trace_section(self):
+        """手工构造的卡片没有轨迹时，不能凭空印一个小节。"""
+        markdown = render_markdown(make_result(cards=[make_card()]))
+        assert "检索轨迹" not in markdown
+
+    def test_the_promise_is_only_made_when_there_is_a_trace(self):
+        """★ "检索轨迹见下方"是一句**承诺**，没有轨迹时不许说。
+
+        这条守卫的是"报告不说空话" —— M2 修的很大一类问题就是声明与事实不符
+        （结论文案声称有轨迹、而产物里根本没有）。
+        """
+        with_trace = make_card(research_queries=self.TRACES)
+        without = make_card()
+
+        assert "见下方" in render_html(make_result(cards=[with_trace]))
+        assert "见下方" not in render_html(make_result(cards=[without]))
+
+
+class TestUnjudgedCompetitorsAreLabelled:
+    """相关性判定失败时，卡片必须说清"这些竞品没验过"。
+
+    判定失败时全部候选被**保留**（保守取舍，见 ``research/relevance.py``），于是
+    findings 非空 ⇒ 状态是 ``ok``。缺了这个标记，一次 LLM 抖动在卡片上与一次
+    正常判定**长得一模一样** —— 用户会把"候选全量保留"当成"这个方向真的有这些
+    竞品"，而那正是 M2 验收门要抓的误报。
+    """
+
+    UNRELATED = [
+        CompetitorFinding(source="github", name="someone/books", url="https://example.test/books")
+    ]
+
+    def test_markdown_warns_the_competitors_are_unjudged(self):
+        card = make_card(
+            competitors=self.UNRELATED,
+            research_status="ok",
+            research_judgement_failed=True,
+        )
+        assert "未经相关性判定" in render_markdown(make_result(cards=[card]))
+
+    def test_html_warns_the_competitors_are_unjudged(self):
+        card = make_card(
+            competitors=self.UNRELATED,
+            research_status="ok",
+            research_judgement_failed=True,
+        )
+        assert "未经相关性判定" in render_html(make_result(cards=[card]))
+
+    def test_normal_judgement_says_nothing_extra(self):
+        """反向守卫：判定正常时不加这句话 —— 否则提示会变成人人忽略的噪音。"""
+        card = make_card(competitors=self.UNRELATED, research_status="ok")
+        assert "未经相关性判定" not in render_markdown(make_result(cards=[card]))
+        assert "未经相关性判定" not in render_html(make_result(cards=[card]))

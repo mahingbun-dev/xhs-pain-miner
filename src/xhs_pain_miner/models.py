@@ -379,6 +379,43 @@ class PainCluster:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class QueryTrace:
+    """一次检索的可追溯记录 —— 「结论可逐条复核」这个卖点的落地。
+
+    它回答的是"这个「查证过没有竞品」是怎么得出来的"：实际搜了什么词、发给了哪个
+    平台、平台回了几条、最后留了几条。没有它，结论无法被质疑 —— 而"能被质疑"
+    正是本产品对"免费的 LLM 摘要"的正面防守。
+
+    定义在这里而不是 :mod:`~xhs_pain_miner.research.outcome` 里，理由与
+    :data:`ResearchStatus` 相同：:attr:`OpportunityCard.research_queries` 要用它，
+    而 ``research`` 反过来依赖 ``models``，反向 import 会成环。
+
+    Attributes:
+        query: 实际发给平台的检索词。
+        channel: 检索的渠道。
+        hits: 平台返回的**原始**命中数（相关性过滤之前）。它是区分
+            "查证过确实没有"与"检索不到"的唯一依据，见 ``classify_status``。
+        kept: 相关性过滤后保留的条数。
+        error: 该次查询的失败原因。非 ``None`` 表示**这次没查成**。
+    """
+
+    query: str
+    channel: CompetitorSource
+    hits: int = 0
+    kept: int = 0
+    error: str | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        """这次查询是否真的拿到了平台响应 —— 命中 0 条也算成功。
+
+        把"0 命中"当成失败会让结论退化成"调研失败"，用户就看不到"这个词在该平台
+        检索不到"这条更有价值的信息。
+        """
+        return self.error is None
+
+
 @dataclass(slots=True)
 class CompetitorFinding:
     """一条竞品调研结果。
@@ -457,6 +494,29 @@ class OpportunityCard:
     不同的话 —— 此前它只能靠"没有竞品 **且** 空白度恰好为 0.5"反推"是不是
     没查成"，而那条反推存在精确碰撞（2 个零 star 的活跃竞品恰好也是 0.5），
     报告会因此凭空多印一句"本次调研未完成"。
+    """
+
+    research_queries: tuple[QueryTrace, ...] = ()
+    """该簇的检索轨迹 —— **本地展示用，刻意不进上传载荷**。
+
+    它是"结论可逐条复核"这个卖点的落地：用户能看到实际搜了什么词、发给了哪个
+    平台、平台回了几条、最后留了几条。没有它，「查证过，没有相关竞品」这个结论
+    无法被质疑 —— 而那正是 M2 存在的理由。
+
+    不进出网载荷的原因与 ``title`` / ``summary`` 那类字段相反：检索词是 **LLM
+    生成的自由文本**，而提示词里带了用户原话（模型可能回抄），所以它属于"必须
+    先过回抄检测"的那一类。M4 若要把轨迹一起上传，必须先调
+    :func:`find_verbatim_overlap`，**不能**直接加进白名单。
+    """
+
+    research_judgement_failed: bool = False
+    """相关性判定本身是否失败（候选未经判定就被保留）。
+
+    与 :attr:`research_status` **正交**：判定失败时全部候选会留在 ``relevant``
+    （保守取舍，见 :mod:`~xhs_pain_miner.research.relevance`），于是有 findings ⇒
+    状态是 ``ok``。但那个 ``ok`` 的含义是"没有被排除"，不是"确认相关"。卡片
+    必须把这件事说出来，否则用户会把一次 LLM 抖动当成"这个方向真的已经有这些
+    竞品"—— 而那正是 M2 验收门要抓的误报。
     """
 
     @property

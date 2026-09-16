@@ -38,12 +38,13 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from xhs_pain_miner.models import CompetitorFinding, CompetitorSource, ResearchStatus
+from xhs_pain_miner.models import CompetitorFinding, QueryTrace, ResearchStatus
 
-# ``ResearchStatus`` 的唯一份定义在 :mod:`~xhs_pain_miner.models`（那里是数据契约
-# 层，:attr:`~xhs_pain_miner.models.OpportunityCard.research_status` 要用它；反过来
-# 让 models 依赖 research 会成环）。本模块把它转出，``from
-# xhs_pain_miner.research.outcome import ResearchStatus`` 因此照旧可用。
+# ``ResearchStatus`` 与 ``QueryTrace`` 的唯一份定义在 :mod:`~xhs_pain_miner.models`
+# （那里是数据契约层，:attr:`~xhs_pain_miner.models.OpportunityCard.research_status`
+# 与 ``research_queries`` 要用它们；反过来让 models 依赖 research 会成环）。
+# 本模块把它们转出，``from xhs_pain_miner.research.outcome import QueryTrace``
+# 因此照旧可用。
 
 STATUS_LABELS: Mapping[ResearchStatus, str] = {
     "ok": "查到竞品",
@@ -56,41 +57,6 @@ STATUS_LABELS: Mapping[ResearchStatus, str] = {
 放在这里而不是各渲染器里：结论只有四种，措辞也该只有一个事实来源，
 否则 HTML 与 Markdown 两份产物会慢慢漂移成两套说法。
 """
-
-
-@dataclass(frozen=True, slots=True)
-class QueryTrace:
-    """一次检索的可追溯记录。
-
-    保留它是为了让结论**可复核**：用户能看见实际搜了什么词、平台回了多少条、
-    我们最终留下了几条。没有这个，一个 ``no_competitor`` 结论无法被质疑 ——
-    而"结论可被点开核实"正是本产品对"免费 LLM 摘要"的正面防守。
-    """
-
-    query: str
-    """实际发给平台的检索词。"""
-
-    channel: CompetitorSource
-    """检索的渠道。"""
-
-    hits: int = 0
-    """平台返回的**原始**命中数（相关性过滤之前）。
-
-    这个字段是区分 ``no_competitor`` 与 ``unsearchable`` 的**唯一依据**：
-    ``0`` 表示平台对这个词压根没返回东西（多半是检索不到），大于 ``0`` 表示
-    平台搜得到、只是不相关（那才是"确实没有竞品"）。
-    """
-
-    kept: int = 0
-    """相关性过滤后保留的条数。``kept == 0 and hits > 0`` 就是"搜到过但不相关"。"""
-
-    error: str | None = None
-    """该次查询的失败原因（网络 / 限流）。非 ``None`` 表示这次**没查成**。"""
-
-    @property
-    def succeeded(self) -> bool:
-        """这次查询是否真的拿到了平台响应。"""
-        return self.error is None
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +74,16 @@ class ResearchOutcome:
     status: ResearchStatus = "unsearchable"
     queries: tuple[QueryTrace, ...] = ()
     warning: str | None = None
+    judgement_failed: bool = False
+    """相关性判定本身是否失败 —— 与 :attr:`status` **正交**。
+
+    判定失败时全部候选会留在 ``relevant``（保守取舍，见
+    :mod:`~xhs_pain_miner.research.relevance`），于是有 findings ⇒ ``status`` 是
+    ``ok``。但那个 ``ok`` 的含义是"没有被排除"，不是"确认相关"。
+
+    它必须是结论**自带**的字段，而不是调用方额外传的一个参数：结论说的是"我查到
+    了这些竞品"，而这个字段说的是"但我没验过它们"。少了它，一次 LLM 抖动会在
+    卡片上和一次正常判定**长得一模一样**。"""
 
     @property
     def verified_empty(self) -> bool:
@@ -164,6 +140,8 @@ class ResearchOutcome:
             status=status,
             queries=queries,
             warning=" ".join(warnings) if warnings else None,
+            # 任一渠道的判定没做成，整个结论的竞品清单就都是"未经判定"的
+            judgement_failed=self.judgement_failed or other.judgement_failed,
         )
 
 
@@ -192,9 +170,12 @@ def classify_status(
     2. 没有任何一次查询成功：
        * 有查询词但全失败 → ``failed``（查了，没查成）
        * 压根没有查询词 → ``unsearchable``（没查）
-    3. 成功的查询里**有任何一次命中数 > 0** → ``no_competitor``
+    3. **有查询没查成**（部分失败）→ ``unsearchable``
+       —— 没查成的那次里可能正躺着竞品。这与 :meth:`ResearchOutcome.merged`
+       的跨渠道规则是同一条：没查成 ≠ 没有。
+    4. 查询**全部成功**，且有任何一次命中数 > 0 → ``no_competitor``
        —— 平台搜得到东西，只是没有相关的，这才叫"查证过确实没有"。
-    4. 成功但全部 0 命中 → ``unsearchable``
+    5. 查询全部成功但全部 0 命中 → ``unsearchable``
        —— 检索不到不等于没有，这是 M2 修掉的那个假空白。
 
     Args:
@@ -211,6 +192,16 @@ def classify_status(
     if not succeeded:
         return "failed" if queries else "unsearchable"
 
+    # ★ 有查询**没查成**时不能断言"没有竞品" —— 那个没查成的查询里可能正躺着竞品。
+    #
+    # 缺了这一步会产出**自相矛盾**的结论：失败轨迹自己的文案写着"该簇的竞品空白度
+    # 必须按中性值处理"，而结论给出的正是 1.0、报告印「✅ 查证过，没有相关竞品」。
+    # 而且这条路径**可达**：``_search_channels`` 在渠道内首次失败即放弃（避免加深
+    # 限流），所以"第一条词查到、第二条被限流"正是限流随运行累积时的常见形态。
+    # 跨渠道有 :meth:`merged` 挡着，同渠道内原本没有 —— 这是同一个不变式的缺口。
+    if len(succeeded) < len(queries):
+        return "unsearchable"
+
     if any(trace.hits > 0 for trace in succeeded):
         return "no_competitor"
 
@@ -222,6 +213,7 @@ def build_outcome(
     findings: Sequence[CompetitorFinding],
     *,
     subject: str,
+    judgement_failed: bool = False,
 ) -> ResearchOutcome:
     """从检索轨迹构造结论，并生成**如实**的警告文案。
 
@@ -229,6 +221,9 @@ def build_outcome(
         queries: 全部检索轨迹。
         findings: 相关性过滤后保留的竞品。
         subject: 这次调研的对象（痛点名），用于让警告能指认是谁。
+        judgement_failed: 相关性判定是否失败。失败时 ``findings`` 会是**全部**
+            候选（保守取舍），结论必须把"这些没验过"带出去，否则一次 LLM 抖动
+            在卡片上与正常判定长得一模一样。
 
     Returns:
         结论。``warning`` 在需要说明时非空。
@@ -239,6 +234,7 @@ def build_outcome(
         status=status,
         queries=tuple(queries),
         warning=warning_for(status, queries, subject=subject),
+        judgement_failed=judgement_failed,
     )
 
 
