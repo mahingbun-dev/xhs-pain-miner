@@ -373,6 +373,10 @@ class CompetitorFinding:
 
     Attributes:
         last_active: 最近一次提交 / 更新时间。停更的竞品意味着机会，必须如实呈现。
+        description: 该竞品在平台上的**公开描述**（仓库描述 / App 副标题）。
+            它是判定相关性的主要依据 —— 只凭名字无法回答"这个项目是不是真的在
+            解决这个痛点"，而**误报**（把不相关的项目判成竞品）正是 M2 验收门
+            要抓的东西。内容来自公开平台、不含用户原文，因此可随结论一起出网。
         gap_notes: 该竞品没有覆盖到的部分（由 LLM 结合痛点归纳）。
     """
 
@@ -381,6 +385,7 @@ class CompetitorFinding:
     url: str = ""
     stars: int | None = None
     last_active: date | None = None
+    description: str = ""
     gap_notes: str = ""
 
     @property
@@ -398,6 +403,7 @@ class CompetitorFinding:
             "url": self.url,
             "stars": self.stars,
             "last_active": self.last_active.isoformat() if self.last_active else None,
+            "description": self.description,
             "gap_notes": self.gap_notes,
         }
 
