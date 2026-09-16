@@ -534,6 +534,31 @@ class TestDegradation:
         assert cluster.sentiment == 0.0
         assert cluster.stage == "stable"
 
+    def test_keep_labels_preserves_summary_and_category_too(self):
+        """★「保留已有的名字与摘要」必须**整体**成立 —— 不能只保住名字。
+
+        ``keep_labels`` 的契约是名字与摘要都留，而 ``summary`` 在 Markdown 与 HTML
+        产物上都是**可见行**。只保名字、顺带清空摘要的实现会让用户静默少一行内容，
+        而警告文案纹丝不动（仍说"痛点名已保留"）—— 等于**反向复活**了本提交修掉的
+        「文案与实际不符」那类缺陷。
+        """
+        cluster = make_cluster(1, label="假白泛白")
+        cluster.summary = "上脸泛白像糊了面粉，和脖子色差明显"
+        cluster.category = "结果不达预期"
+
+        warnings = label_clusters(
+            [cluster], provider=FakeProvider(_respond_by_marker), keep_labels=True
+        )
+
+        assert warnings == []
+        assert cluster.label == "假白泛白"
+        assert cluster.summary == "上脸泛白像糊了面粉，和脖子色差明显", "摘要被覆盖了"
+        assert cluster.category == "结果不达预期", "类别被覆盖了"
+        # 情感 / 趋势 / 难度**不在**"保留"范围内 —— 它们是这次调用的产出，必须写回
+        assert cluster.sentiment == pytest.approx(-0.6)
+        assert cluster.stage == "growing"
+        assert cluster.difficulty == 2
+
     def test_noise_bucket_is_never_named(self):
         """★ 噪声桶（未归类文本）**不参与命名** —— 它是兜底桶，不是某个真实痛点。
 

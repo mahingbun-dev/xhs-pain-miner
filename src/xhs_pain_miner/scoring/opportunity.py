@@ -341,7 +341,8 @@ def mention_volume(cluster: PainCluster, *, max_size: int) -> float:
 
     Args:
         cluster: 痛点簇。
-        max_size: 本次分析里最大簇的 size，作为归一化基准。
+        max_size: 归一化基准 —— **参与机会评估**的簇里最大的 size。噪声桶
+            （未归类文本）已被挡在卡片之外，不充当基准，理由见 :func:`build_cards`。
 
     Returns:
         ``[0, 1]``。``max_size <= 0`` 时返回 0。
@@ -579,7 +580,7 @@ def build_card(
         findings: 该簇的竞品调研结果。
         weights: 因子权重。
         keyword: 品类关键词。
-        max_size: 归一化基准（最大簇的 size）。
+        max_size: 归一化基准（**参与机会评估**的簇里最大的 size）。
         research_failed: 该簇的竞品调研是否失败。
         direction_template: 标题用的方向模板；``None`` 时按痛点名推导。
             **只有** :func:`build_cards` 需要传它 —— 标题唯一性是整份报告的性质，
@@ -686,7 +687,9 @@ def build_cards(
     failed = set(failed_clusters)
     # 归一化基准取**参与机会评估**的簇的最大 size：
     # * 与 min_size 过滤解耦 —— 调用方调整过滤阈值时，已经能进报告的卡片分数
-    #   不该跟着变（否则两次运行没法对比）。
+    #   不该跟着变（否则两次运行没法对比）。这条是**构造成立**的：max 永远落在
+    #   未被 min_size 过滤掉的簇上（最大的簇必然 ≥ min_size，否则所有簇都被过滤、
+    #   根本没有卡片），所以这里不必也不该再按 min_size 过滤一次。
     # * 但必须排除噪声桶 —— 它已被挡在卡片之外（见下面 selected 的过滤条件），
     #   再拿它当基准会让「未归类文本越多 → 所有真实痛点的提及量分越低」，
     #   等于用分类质量差去惩罚真实痛点。提及次数是本产品的核心指标，
