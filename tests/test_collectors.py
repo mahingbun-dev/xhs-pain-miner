@@ -45,13 +45,25 @@ class TestFixtureData:
         assert data["notes"], "样例语料不能为空"
         assert data["comments"], "样例语料必须包含评论"
 
-    def test_uses_unroutable_domain(self):
-        """样例里的 URL 必须落在 .invalid 顶级域，确保永远不会被真实请求。"""
+    def test_urls_are_never_really_requestable(self):
+        """样例里的地址必须永远无法被真实请求。
+
+        两类地址各有各的保证方式：
+
+        * 笔记 URL 落在 ``.invalid`` 顶级域（RFC 2606 保留，DNS 永远解析不了）；
+        * 图片地址用 ``synthetic://`` 自定义 scheme，由本地按确定性规则生成。
+
+        M1 把图片从 ``.invalid`` 改成 ``synthetic://`` 是刻意的：假域名下图片
+        必然下载失败，``--deep`` 的 VLM 链路就只能测到失败分支。
+        """
         data = load_fixture_data()
         for note in data["notes"]:
-            assert "example.invalid" in note["url"]
+            assert "example.invalid" in note["url"], note["url"]
             for image in note.get("images", []):
-                assert "example.invalid" in image
+                assert image.startswith("synthetic://"), (
+                    f"图片地址 {image!r} 既不是合成图协议、也不在 .invalid 域下 —— "
+                    "样例语料不得指向任何真实的、可被请求的地址"
+                )
 
     def test_covers_expected_pain_clusters(self):
         """语料必须覆盖足够多的痛点主题，否则聚类效果验证不出问题。"""
@@ -124,9 +136,17 @@ class TestFixtureBackend:
         assert corpus.comments == []
 
     def test_full_collect_returns_all(self):
+        """★ M1 扩充语料后改为范围断言。
+
+        硬编码 ``== 12`` 会让每一次语料扩充都表现为"测试失败"而不是"数据变化"。
+        测试应当描述**不变量**（取满时笔记数与源数据一致），而不是记住某个数字。
+        """
+        data = load_fixture_data()
         corpus = FixtureBackend().collect("防晒霜", limit=999, max_comments_per_note=999)
-        assert len(corpus.notes) == 12
-        assert len(corpus.comments) == 65
+
+        assert len(corpus.notes) == len(data["notes"])
+        assert len(corpus.notes) >= 200, "M1 验收门①要求端到端跑通 200 篇"
+        assert len(corpus.comments) > len(corpus.notes), "评论应显著多于笔记"
 
     def test_hashes_not_raw_ids(self):
         """★ 合规：语料里不得出现未哈希的用户标识。"""

@@ -85,8 +85,26 @@ def load_fixture_data(path: Path | None = None) -> dict[str, Any]:
     return _ensure_object(parsed, f"内置样例数据 {FIXTURE_RESOURCE}")
 
 
+def _truth_label(item: dict[str, Any]) -> str:
+    """取出样例语料里的 ``truth_label``（真实痛点标注）。
+
+    这是验收门③「频次误差 < 15%」能**自动**计算的前提：没有它，聚类准不准只能靠
+    人工逐条数原文。它随 :attr:`~xhs_pain_miner.models.RawNote.extra` 传递 ——
+    ``RawNote`` / ``RawComment`` 是采集层的通用模型，不该为了一个只在 fixture 里
+    存在的验收字段开新属性。
+
+    非字符串一律当作没有标注：标注错了比没有标注更危险，它会让验收数字看起来
+    正常却指向错误的结论。
+    """
+    value = item.get("truth_label", "")
+    return value if isinstance(value, str) else ""
+
+
 def parse_corpus(data: dict[str, Any], *, keyword: str | None = None) -> RawCorpus:
     """把样例 JSON 转换成 :class:`RawCorpus`。
+
+    只搬运 ``truth_label`` 一个额外字段，不把整个 JSON 条目塞进 ``extra`` ——
+    样例文件未来可能加入更多平台字段，无差别透传会把未经哈希的标识一路带到下游。
 
     Args:
         data: :func:`load_fixture_data` 的返回值。
@@ -107,6 +125,7 @@ def parse_corpus(data: dict[str, Any], *, keyword: str | None = None) -> RawCorp
             comments_count=int(item.get("comments_count", 0)),
             publish_time=_parse_dt(item.get("publish_time")),
             author_hash=item.get("author_hash", ""),
+            extra={"truth_label": _truth_label(item)},
         )
         for item in data.get("notes", [])
     ]
@@ -119,6 +138,7 @@ def parse_corpus(data: dict[str, Any], *, keyword: str | None = None) -> RawCorp
             note_id=str(item.get("note_id", "")),
             created_at=_parse_dt(item.get("created_at")),
             user_hash=item.get("user_hash", ""),
+            extra={"truth_label": _truth_label(item)},
         )
         for item in data.get("comments", [])
     ]

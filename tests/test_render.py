@@ -1,0 +1,543 @@
+"""渲染层测试 —— 安全、降级、两种产物的分工。
+
+本文件的重点不是"能不能渲染出 HTML"，而是三件容易出事的事：
+
+1. **HTML 转义**：卡片字段来自采集内容（不可信输入）。断言必须落在"输出里没有
+   未转义的 ``<script``"上，而不是"没抛异常"—— 后者是恒真断言，守不住任何东西。
+2. **调研失败 ≠ 没有竞品**：报告里这两句话必须长得不一样。渲染层靠
+   ``competitor_gap == 0.5 且无竞品`` 反推，这条推理错了就会在报告里写下一句
+   无依据的结论。
+3. **Markdown 不含证据原文**：这是与 HTML 产物刻意的设计差异，用一条守卫测试钉住。
+"""
+
+from __future__ import annotations
+
+from datetime import date, datetime, timezone
+from pathlib import Path
+
+from xhs_pain_miner.models import (
+    CompetitorFinding,
+    Evidence,
+    MiningResult,
+    OpportunityCard,
+    PainCluster,
+    RunCost,
+)
+from xhs_pain_miner.render.html import DEFAULT_TITLE, render_html, write_html
+from xhs_pain_miner.render.markdown import render_markdown
+
+XSS_SCRIPT = "<script>alert(1)</script>"
+XSS_IMG = '<img src=x onerror="alert(1)">'
+XSS_BREAKOUT = '"><script>alert(2)</script>'
+RAW_TEXT = "我用的那支上脸假白到像糊了面粉，同事问我是不是过敏了，这句话只属于本机"
+OLD_DATE = date(2023, 5, 1)
+
+
+def make_cluster(
+    *,
+    id_: str = "p1",
+    label: str = "假白泛白",
+    summary: str = "涂完像戴了面具，脖子和脸有色差",
+    size: int = 89,
+    sentiment: float = -0.85,
+    evidences: list[Evidence] | None = None,
+    category: str = "结果不达预期",
+    stage: str = "growing",
+    difficulty: int = 2,
+    feasibility: str = "个人可做 / 1-2 周",
+    is_noise: bool = False,
+) -> PainCluster:
+    return PainCluster(
+        id=id_,
+        label=label,
+        summary=summary,
+        size=size,
+        sentiment=sentiment,
+        evidences=evidences
+        if evidences is not None
+        else [Evidence(text=RAW_TEXT, source="comment", likes=42)],
+        category=category,
+        stage=stage,  # type: ignore[arg-type]
+        difficulty=difficulty,
+        feasibility=feasibility,
+        is_noise=is_noise,
+    )
+
+
+def make_card(
+    cluster: PainCluster | None = None,
+    *,
+    id_: str = "card-p1",
+    title: str = "防晒霜 · 更省事的工具",
+    competitors: list[CompetitorFinding] | None = None,
+    score: float = 78.4,
+    score_breakdown: dict[str, float] | None = None,
+    feasibility: str = "个人可做 / 1-2 周",
+) -> OpportunityCard:
+    return OpportunityCard(
+        id=id_,
+        title=title,
+        pain=cluster if cluster is not None else make_cluster(),
+        competitors=competitors if competitors is not None else [],
+        score=score,
+        score_breakdown=score_breakdown
+        if score_breakdown is not None
+        else {
+            "pain_strength": 0.92,
+            "mention_volume": 0.71,
+            "growth_trend": 0.55,
+            "competitor_gap": 1.0,
+            "feasibility": 0.75,
+        },
+        feasibility=feasibility,
+    )
+
+
+def make_result(
+    *,
+    keyword: str = "防晒霜",
+    cards: list[OpportunityCard] | None = None,
+    clusters: list[PainCluster] | None = None,
+    notes: list[str] | None = None,
+) -> MiningResult:
+    card_list = cards if cards is not None else [make_card()]
+    return MiningResult(
+        keyword=keyword,
+        cards=card_list,
+        clusters=clusters if clusters is not None else [card.pain for card in card_list],
+        total_notes=200,
+        total_comments=2400,
+        generated_at=datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc),
+        cost=RunCost(llm_calls=35, vlm_calls=12, elapsed_seconds=93.5),
+        notes=notes if notes is not None else [],
+    )
+
+
+def _assert_payload_is_inert(document: str) -> None:
+    """断言注入载荷没有变成标记。"""
+    assert "<script" not in document
+    assert "<img" not in document
+    assert "<iframe" not in document
+
+
+# --------------------------------------------------------------------------- #
+# HTML：转义（本模块最重要的一组）
+# --------------------------------------------------------------------------- #
+
+
+class TestHtmlEscaping:
+    """★ 安全测试：每个字段都要单独撞一次。
+
+    逐字段构造的意义在于**失败时能直接定位到漏转义的字段**，而不是拿到一句
+    "报告里有未转义的 script"。
+    """
+
+    def test_script_in_report_title_is_escaped(self):
+        document = render_html(make_result(keyword=XSS_SCRIPT))
+        _assert_payload_is_inert(document)
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in document
+
+    def test_script_in_explicit_title_is_escaped(self):
+        _assert_payload_is_inert(render_html(make_result(), title=XSS_SCRIPT))
+
+    def test_script_in_card_title_is_escaped(self):
+        _assert_payload_is_inert(render_html(make_result(cards=[make_card(title=XSS_SCRIPT)])))
+
+    def test_script_in_pain_label_is_escaped(self):
+        _assert_payload_is_inert(
+            render_html(make_result(cards=[make_card(make_cluster(label=XSS_SCRIPT))]))
+        )
+
+    def test_img_onerror_in_pain_label_is_escaped(self):
+        document = render_html(make_result(cards=[make_card(make_cluster(label=XSS_IMG))]))
+        _assert_payload_is_inert(document)
+        assert "&lt;img src=x" in document
+        assert 'onerror="alert(1)"' not in document  # 属性逃逸必须失败
+        assert "&quot;" in document  # 引号确实被转义成了实体
+
+    def test_script_in_summary_is_escaped(self):
+        _assert_payload_is_inert(
+            render_html(make_result(cards=[make_card(make_cluster(summary=XSS_SCRIPT))]))
+        )
+
+    def test_script_in_category_is_escaped(self):
+        _assert_payload_is_inert(
+            render_html(make_result(cards=[make_card(make_cluster(category=XSS_SCRIPT))]))
+        )
+
+    def test_script_in_cluster_id_is_escaped(self):
+        """簇 id 会进 ``id`` 属性与卡片 id —— 属性上下文同样要转义。"""
+        _assert_payload_is_inert(
+            render_html(make_result(cards=[make_card(make_cluster(id_=XSS_BREAKOUT))]))
+        )
+
+    def test_script_in_evidence_text_is_escaped(self):
+        """证据原文是最典型的不可信输入（采集内容）。"""
+        evidence = Evidence(text=XSS_SCRIPT, source="comment", likes=3)
+        document = render_html(make_result(cards=[make_card(make_cluster(evidences=[evidence]))]))
+        _assert_payload_is_inert(document)
+        assert "&lt;script&gt;" in document
+
+    def test_script_in_competitor_name_is_escaped(self):
+        finding = CompetitorFinding(source="github", name=XSS_SCRIPT, url="https://e.test/x")
+        _assert_payload_is_inert(render_html(make_result(cards=[make_card(competitors=[finding])])))
+
+    def test_script_in_competitor_gap_notes_is_escaped(self):
+        finding = CompetitorFinding(
+            source="github", name="tool", url="https://e.test/x", gap_notes=XSS_SCRIPT
+        )
+        _assert_payload_is_inert(render_html(make_result(cards=[make_card(competitors=[finding])])))
+
+    def test_script_in_competitor_url_cannot_break_out_of_href(self):
+        finding = CompetitorFinding(
+            source="github", name="tool", url=f"https://evil.test/{XSS_BREAKOUT}"
+        )
+        document = render_html(make_result(cards=[make_card(competitors=[finding])]))
+        _assert_payload_is_inert(document)
+        assert "&quot;&gt;" in document  # 引号与尖括号都被转义
+
+    def test_script_in_notes_is_escaped(self):
+        _assert_payload_is_inert(render_html(make_result(notes=[XSS_SCRIPT])))
+
+    def test_script_in_keyword_and_notes_together(self):
+        _assert_payload_is_inert(render_html(make_result(keyword=XSS_IMG, notes=[XSS_BREAKOUT])))
+
+    def test_plain_text_is_not_over_escaped_into_garbage(self):
+        """转义不能把正常中文与标点弄坏。"""
+        document = render_html(make_result())
+        assert "假白泛白" in document
+        assert "涂完像戴了面具" in document
+
+
+class TestHtmlUrlHardening:
+    """转义拦不住 ``javascript:`` —— 那是合法 URL，只能靠协议白名单。"""
+
+    def test_javascript_url_is_not_turned_into_a_link(self):
+        finding = CompetitorFinding(source="github", name="sneaky", url="javascript:alert(1)")
+        document = render_html(make_result(cards=[make_card(competitors=[finding])]))
+        assert "javascript:" not in document
+        assert "sneaky" in document  # 名字仍然展示，只是不可点
+
+    def test_url_with_control_characters_is_not_linked(self):
+        finding = CompetitorFinding(source="github", name="sneaky", url="java\nscript:alert(1)")
+        document = render_html(make_result(cards=[make_card(competitors=[finding])]))
+        assert "javascript:" not in document
+
+    def test_https_url_is_linked(self):
+        finding = CompetitorFinding(
+            source="github", name="real", url="https://github.com/example/real"
+        )
+        document = render_html(make_result(cards=[make_card(competitors=[finding])]))
+        assert 'href="https://github.com/example/real"' in document
+
+
+class TestHtmlSelfContained:
+    """自包含：内联样式、无外部资源、无 JavaScript。"""
+
+    def test_document_shell(self):
+        document = render_html(make_result())
+        assert document.startswith("<!DOCTYPE html>")
+        assert '<html lang="zh-CN">' in document
+        assert '<meta charset="utf-8">' in document
+        assert "<style>" in document
+        assert document.rstrip().endswith("</html>")
+
+    def test_no_external_resources(self):
+        document = render_html(make_result())
+        for marker in ("<link", "@import", "url(", "<script", "<iframe", "<img"):
+            assert marker not in document, marker
+
+    def test_default_title_uses_keyword(self):
+        assert "防晒霜 机会卡片" in render_html(make_result())
+
+    def test_empty_keyword_falls_back_to_default_title(self):
+        assert DEFAULT_TITLE in render_html(make_result(keyword=""))
+
+
+class TestHtmlResearchState:
+    """★ 三种状态必须说成三句不同的话。"""
+
+    def test_failed_research_is_not_reported_as_no_competitor(self):
+        card = make_card(
+            competitors=[],
+            score_breakdown={
+                "pain_strength": 0.9,
+                "mention_volume": 0.7,
+                "growth_trend": 0.5,
+                "competitor_gap": 0.5,  # 中性值 = 调研失败
+                "feasibility": 0.75,
+            },
+        )
+        document = render_html(make_result(cards=[card]))
+        assert "调研未完成" in document
+        assert "未发现竞品" not in document
+        assert "不代表该方向没有竞品" in document
+
+    def test_verified_empty_market_says_no_competitor(self):
+        card = make_card(competitors=[], score_breakdown={"competitor_gap": 1.0})
+        document = render_html(make_result(cards=[card]))
+        assert "未发现竞品" in document
+        assert "调研未完成" not in document
+
+    def test_all_stale_competitors_are_reported_honestly(self):
+        stale = CompetitorFinding(
+            source="github", name="old", url="https://e.test/old", stars=128, last_active=OLD_DATE
+        )
+        document = render_html(make_result(cards=[make_card(competitors=[stale])]))
+        assert "均已停更" in document
+        assert "2023-05-01" in document
+
+    def test_active_competitors_are_reported(self):
+        active = CompetitorFinding(
+            source="github",
+            name="live",
+            url="https://e.test/live",
+            stars=9000,
+            last_active=date.today(),
+        )
+        document = render_html(make_result(cards=[make_card(competitors=[active])]))
+        assert "活跃维护" in document
+        assert "9000" in document
+
+
+class TestHtmlMissingFields:
+    """缺字段时少显示，而不是崩溃 —— 真实语料里这些字段大量为空。"""
+
+    def test_minimal_card_renders(self):
+        cluster = make_cluster(
+            label="", summary="", evidences=[], category="", feasibility="", size=0, sentiment=0.0
+        )
+        card = make_card(cluster, title="", feasibility="", score=0.0, score_breakdown={})
+        document = render_html(make_result(cards=[card]))
+        assert "<!DOCTYPE html>" in document
+        assert "未评估" in document  # 可行度缺失时如实说"未评估"
+
+    def test_result_without_cards_renders(self):
+        document = render_html(make_result(cards=[], clusters=[]))
+        assert "<!DOCTYPE html>" in document
+        assert "机会卡片" in document
+
+    def test_evidence_without_timestamp_renders(self):
+        evidence = Evidence(text="没有时间信息", source="note", likes=0, created_at=None)
+        document = render_html(make_result(cards=[make_card(make_cluster(evidences=[evidence]))]))
+        assert "没有时间信息" in document
+
+    def test_evidence_with_timestamp_shows_date(self):
+        evidence = Evidence(
+            text="有时间的证据",
+            source="comment",
+            likes=7,
+            created_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        )
+        document = render_html(make_result(cards=[make_card(make_cluster(evidences=[evidence]))]))
+        assert "2026-08-01" in document
+
+    def test_competitor_without_stars_or_activity_renders(self):
+        finding = CompetitorFinding(
+            source="github", name="mystery", url="", stars=None, last_active=None
+        )
+        document = render_html(make_result(cards=[make_card(competitors=[finding])]))
+        assert "stars 未知" in document
+        assert "最后活跃：未知" in document
+
+    def test_evidence_over_limit_is_truncated_with_a_note(self):
+        evidences = [Evidence(text=f"证据 {i}", source="comment", likes=i) for i in range(9)]
+        document = render_html(
+            make_result(cards=[make_card(make_cluster(evidences=evidences))]), max_evidence=3
+        )
+        assert "证据 0" in document
+        assert "证据 3" not in document
+        assert "另有 6 条证据" in document
+
+    def test_max_evidence_zero_hides_all_evidence(self):
+        document = render_html(make_result(), max_evidence=0)
+        assert RAW_TEXT not in document
+        # 没内嵌 ≠ 没有证据：条数仍然要报出来
+        assert "该簇共 1 条" in document
+
+    def test_noise_cards_are_excluded_by_default(self):
+        noise = make_card(
+            make_cluster(id_="noise", is_noise=True, label="长尾怪癖"), id_="card-noise"
+        )
+        normal = make_card()
+        document = render_html(make_result(cards=[noise, normal]))
+        assert "长尾怪癖" not in document
+        assert "假白泛白" in document
+
+    def test_noise_cards_can_be_included(self):
+        noise = make_card(
+            make_cluster(id_="noise", is_noise=True, label="长尾怪癖"), id_="card-noise"
+        )
+        document = render_html(make_result(cards=[noise]), include_noise=True)
+        assert "长尾怪癖" in document
+        assert "长尾低频痛点" in document
+
+    def test_weights_are_only_shown_when_they_can_be_recovered(self):
+        """卡片不保存权重：默认口径可以还原，自定义口径必须如实说明而不是编一个。"""
+        consistent = make_card(
+            score=77.5,
+            score_breakdown={
+                "pain_strength": 0.5,
+                "mention_volume": 1.0,
+                "growth_trend": 0.5,
+                "competitor_gap": 1.0,
+                "feasibility": 1.0,
+            },
+        )
+        document = render_html(make_result(cards=[consistent]))
+        assert "权重 25%" in document
+
+        inconsistent = make_card(score=42.0, score_breakdown={"pain_strength": 0.5})
+        document = render_html(make_result(cards=[inconsistent]))
+        assert "自定义权重" in document
+
+
+class TestWriteHtml:
+    """文件写入。"""
+
+    def test_writes_utf8_and_returns_absolute_path(self, tmp_path: Path):
+        target = tmp_path / "报告" / "cards.html"
+        written = write_html(make_result(keyword="防晒霜"), target)
+        assert written.is_absolute()
+        assert written.exists()
+        content = written.read_text(encoding="utf-8")
+        assert "防晒霜" in content
+        assert content == render_html(make_result(keyword="防晒霜"))
+
+    def test_bytes_are_valid_utf8(self, tmp_path: Path):
+        target = write_html(make_result(), tmp_path / "cards.html")
+        target.read_bytes().decode("utf-8")  # 解不开就会抛
+
+    def test_parent_directory_is_created(self, tmp_path: Path):
+        target = tmp_path / "a" / "b" / "c.html"
+        write_html(make_result(), target)
+        assert target.parent.is_dir()
+
+    def test_overwrites_existing_file(self, tmp_path: Path):
+        target = tmp_path / "cards.html"
+        write_html(make_result(keyword="第一次"), target)
+        write_html(make_result(keyword="第二次"), target)
+        content = target.read_text(encoding="utf-8")
+        assert "第二次" in content
+        assert "第一次" not in content
+
+
+# --------------------------------------------------------------------------- #
+# Markdown
+# --------------------------------------------------------------------------- #
+
+
+class TestMarkdownNoRawText:
+    """★ 守卫测试：Markdown 产物一个字原文都不能有。"""
+
+    def test_evidence_text_never_appears(self):
+        result = make_result()
+        markdown = render_markdown(result)
+        assert RAW_TEXT not in markdown
+
+    def test_evidence_text_never_appears_even_with_noise_included(self):
+        noise = make_card(
+            make_cluster(id_="n", is_noise=True, evidences=[Evidence(text=RAW_TEXT, source="note")])
+        )
+        markdown = render_markdown(make_result(cards=[noise]), include_noise=True)
+        assert RAW_TEXT not in markdown
+
+    def test_conclusion_fields_do_appear(self):
+        """不嵌原文 ≠ 砍掉结论：痛点名、摘要、因子、竞品都得在。"""
+        markdown = render_markdown(make_result())
+        assert "假白泛白" in markdown
+        assert "涂完像戴了面具" in markdown
+        assert "痛点强度" in markdown
+        assert "78/100" in markdown
+
+    def test_evidence_count_is_reported_without_the_text(self):
+        markdown = render_markdown(make_result())
+        assert "**证据**：1 条" in markdown
+
+
+class TestMarkdownEscaping:
+    """Markdown 不是纯文本：``|`` 与 ``#`` 会破坏结构，``<tag>`` 会被渲染。"""
+
+    def test_pipe_and_hash_are_escaped(self):
+        markdown = render_markdown(
+            make_result(cards=[make_card(make_cluster(label="假白|泛白#1"))])
+        )
+        assert "假白\\|泛白\\#1" in markdown
+
+    def test_newlines_are_flattened(self):
+        markdown = render_markdown(
+            make_result(cards=[make_card(make_cluster(summary="第一行\n第二行"))])
+        )
+        assert "第一行 第二行" in markdown
+        assert "\n第二行" not in markdown
+
+    def test_inline_html_is_escaped(self):
+        markdown = render_markdown(make_result(cards=[make_card(make_cluster(label=XSS_SCRIPT))]))
+        assert "<script" not in markdown
+        assert "&lt;script&gt;" in markdown
+
+    def test_javascript_url_is_not_linked(self):
+        finding = CompetitorFinding(source="github", name="sneaky", url="javascript:alert(1)")
+        markdown = render_markdown(make_result(cards=[make_card(competitors=[finding])]))
+        assert "javascript:" not in markdown
+        assert "sneaky" in markdown
+
+    def test_https_competitor_url_is_linked(self):
+        finding = CompetitorFinding(
+            source="github", name="real", url="https://github.com/example/real", stars=12
+        )
+        markdown = render_markdown(make_result(cards=[make_card(competitors=[finding])]))
+        assert "[real](https://github.com/example/real)" in markdown
+        assert "12★" in markdown
+
+
+class TestMarkdownLayout:
+    def test_starts_with_keyword_heading(self):
+        assert render_markdown(make_result()).startswith("# 防晒霜 机会卡片")
+
+    def test_empty_keyword_heading(self):
+        assert render_markdown(make_result(keyword="")).startswith("# 机会卡片")
+
+    def test_cards_are_ordered_by_score(self):
+        low = make_card(make_cluster(id_="low", label="低分痛点"), id_="card-low", score=30.0)
+        high = make_card(make_cluster(id_="high", label="高分痛点"), id_="card-high", score=90.0)
+        markdown = render_markdown(make_result(cards=[low, high]))
+        assert markdown.index("高分痛点") < markdown.index("低分痛点")
+        assert markdown.index("1. 90/100") < markdown.index("2. 30/100")
+
+    def test_max_cards_limits_output(self):
+        cards = [
+            make_card(make_cluster(id_=f"p{i}", label=f"痛点{i}"), id_=f"card-{i}", score=90.0 - i)
+            for i in range(5)
+        ]
+        markdown = render_markdown(make_result(cards=cards), max_cards=2)
+        assert "痛点0" in markdown
+        assert "痛点1" in markdown
+        assert "痛点2" not in markdown
+        assert "已按 max_cards 截断" in markdown
+
+    def test_noise_excluded_by_default(self):
+        noise = make_card(make_cluster(id_="n", label="长尾怪癖", is_noise=True), id_="card-n")
+        markdown = render_markdown(make_result(cards=[make_card(), noise]))
+        assert "长尾怪癖" not in markdown
+
+    def test_research_failure_is_not_reported_as_empty_market(self):
+        card = make_card(competitors=[], score_breakdown={"competitor_gap": 0.5})
+        markdown = render_markdown(make_result(cards=[card]))
+        assert "调研未完成" in markdown
+        assert "未发现竞品" not in markdown
+
+    def test_empty_result_renders(self):
+        markdown = render_markdown(make_result(cards=[], clusters=[]))
+        assert markdown.startswith("# 防晒霜 机会卡片")
+        assert "没有可展示的卡片" in markdown
+
+    def test_minimal_card_renders(self):
+        cluster = make_cluster(label="", summary="", evidences=[], category="", feasibility="")
+        markdown = render_markdown(make_result(cards=[make_card(cluster, feasibility="")]))
+        assert "（未命名）" in markdown
+
+    def test_notes_are_surfaced(self):
+        markdown = render_markdown(make_result(notes=["VLM 分析缺失"]))
+        assert "运行提示" in markdown
+        assert "VLM 分析缺失" in markdown

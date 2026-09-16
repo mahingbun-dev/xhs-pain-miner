@@ -14,10 +14,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+if TYPE_CHECKING:  # pragma: no cover
+    from xhs_pain_miner.scoring.opportunity import ScoreWeights
 
 LLMProtocol = Literal["chat", "responses", "messages"]
 """LLM 协议：
@@ -101,6 +104,64 @@ class Settings(BaseSettings):
     xhs_cookie: str | None = None
     """仅在使用 MCP 后端时需要，且仅保存在本机。"""
 
+    # --------------------------------------------------------- 痛点发现方式 --
+    pain_discovery: Literal["taxonomy", "cluster"] = "taxonomy"
+    """痛点归集方式。
+
+    * ``taxonomy`` —— LLM 归纳痛点清单 + embedding 分类。**默认**。
+    * ``cluster``  —— HDBSCAN 聚类。
+
+    默认用 ``taxonomy`` 是**实测结论**而非偏好：中文短文本（中位 19 字）的
+    语义信噪比只有 0.06，HDBSCAN 会把一个 130 条的真实痛点切成 16 片，
+    ``size`` 随之失真；而"给定清单做分类"的准确率可达 0.80+。完整数据见
+    :mod:`~xhs_pain_miner.pipeline.taxonomy`。
+
+    ``cluster`` 保留下来，是为了在有真实语料时可以对比两者。
+    """
+
+    pain_taxonomy_sample_size: int = 240
+    """归纳痛点清单时送入 LLM 的样本条数。"""
+
+    pain_max_pains: int = 20
+    """痛点清单的上限。压得太低会让不同问题被合并成笼统类别。"""
+
+    pain_match_threshold: float = 0.30
+    """判为「命中某个痛点」的最低余弦相似度。
+
+    刻意偏低：短文本的余弦相似度整体压缩在 0.5 附近，阈值定高会把大量真实
+    证据挡在门外，让 ``size`` 系统性偏小 —— 那比偶尔混进一条不相干文本更糟。
+    """
+
+    # ------------------------------------------------------------ 竞品调研 --
+    research_enabled: bool = True
+    """是否启用竞品调研。
+
+    关闭后「竞品空白度」因子一律取中性值 —— 注意**不是**取满分：没查过就
+    不知道有没有人做过，给高分等于凭空造机会（见 scoring.opportunity 的
+    公允性规则）。
+    """
+
+    github_token: str | None = None
+    """GitHub Token。匿名调用搜索接口约 10 次/分钟，簇多时必然被限流。"""
+
+    research_max_clusters: int = 12
+    """最多对多少个痛点簇做竞品调研（按提及量降序）。
+
+    GitHub 搜索接口匿名调用约 10 次/分钟，每个簇要 2-3 次查询。不设上限的话，
+    一个 30 簇的分析要跑 9 分钟以上，且必然撞限流 —— 而被限流的簇会退化成
+    "调研失败"，白白浪费前面的调用。**超出的簇按中性值处理并如实告知用户**，
+    这比"跑一半失败"诚实得多。
+    """
+
+    # ----------------------------------------------------------------- 评分 --
+    # 五个因子的权重。可调是本产品与黑箱评分产品的差异点之一 —— 觉得竞品更
+    # 重要就把 weight_competitor_gap 调到 0.4，分数会立刻重算。
+    weight_pain_strength: float = 0.25
+    weight_mention_volume: float = 0.20
+    weight_growth_trend: float = 0.20
+    weight_competitor_gap: float = 0.25
+    weight_feasibility: float = 0.10
+
     # ----------------------------------------------------------------- 限额 --
     max_notes: int = 100
     """开源版单次分析额度上限。"""
@@ -159,6 +220,23 @@ class Settings(BaseSettings):
         return max(self.max_notes, 1)
 
     # ------------------------------------------------------------------ 工具 --
+    def to_weights(self) -> ScoreWeights:
+        """把扁平的配置字段组装成评分权重对象。
+
+        延迟 import 是刻意的：``config`` 是核心模块，任何一次 ``import
+        xhs_pain_miner`` 都会加载它；而 ``scoring`` 只在真正评分时才需要。
+        模块级 import 会让只想跑 ``collect`` 的用户也承担评分模块的加载。
+        """
+        from xhs_pain_miner.scoring.opportunity import ScoreWeights
+
+        return ScoreWeights(
+            pain_strength=self.weight_pain_strength,
+            mention_volume=self.weight_mention_volume,
+            growth_trend=self.weight_growth_trend,
+            competitor_gap=self.weight_competitor_gap,
+            feasibility=self.weight_feasibility,
+        )
+
     def masked_llm_key(self) -> str:
         """返回脱敏后的 LLM Key，用于 ``doctor`` 输出。"""
         return _mask(self.llm_api_key)
