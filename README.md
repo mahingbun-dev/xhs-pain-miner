@@ -255,7 +255,7 @@ xhs-pain-miner collect -k 防晒霜 --backend plugin
 > 根因是中文短文本 embedding 的语义区分度不足（信噪比仅 0.06-0.09：
 > 手写对照语料 0.062、内置合成语料 0.087），换更大的模型也解决不了。
 > 而「给定已知痛点清单做分类」只需相对比较：同一批向量上 LLM 打标 10% 即达 0.803，
-> 且 LLM 调用从约 35 次降到 **2 次**。
+> 且 LLM 调用从「每个簇一次」（实测 171 次）降到「1 次归纳 + 每个痛点 1 次标注」（10 个痛点 = 11 次）。
 > 复现：`.venv/bin/python tools/eval_clustering.py`；详见 [docs/architecture.md](docs/architecture.md)。
 
 ### M2 · 竞品调研补全 ⏳

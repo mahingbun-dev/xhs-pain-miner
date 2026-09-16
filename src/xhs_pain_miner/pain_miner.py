@@ -93,6 +93,21 @@ def normalize_keyword(keyword: str) -> str:
     return cleaned
 
 
+def is_named(cluster: PainCluster) -> bool:
+    """簇是否拿到了**真实的**名字（而不是空串或占位名）。
+
+    判据必须同时排除两种情况：
+
+    * **空字符串** —— 降级到聚类路径、且归纳失败发生在标注之前时是它；
+    * **占位名**（``<未命名痛点 #3>``）—— 标注也失败时是它。
+
+    只判 ``startswith("<")`` 会把空名字当成"已命名"，于是最现实的那条路径
+    （归纳失败、标注恢复）上警告不响，而卡片实际仍是"待命名方向" —— 那正是
+    这条警告要防的情形。
+    """
+    return bool(cluster.label) and not cluster.label.startswith("<")
+
+
 def _warn_if_nothing_was_named(clusters: Sequence[PainCluster], messages: list[str]) -> None:
     """所有痛点都没能命名时，在提示列表最前面插入一条醒目警告。
 
@@ -106,12 +121,12 @@ def _warn_if_nothing_was_named(clusters: Sequence[PainCluster], messages: list[s
     不告知的话，用户要么以为报告坏了，要么更糟 —— 以为真有几十个叫
     "待命名方向"的机会。
     """
-    unnamed = [c for c in clusters if not c.is_noise and c.label.startswith("<")]
-    named = [c for c in clusters if not c.is_noise and not c.label.startswith("<")]
-    if unnamed and not named:
+    real = [c for c in clusters if not c.is_noise]
+    named = [c for c in real if is_named(c)]
+    if real and not named:
         messages.insert(
             0,
-            f"⚠️ 本次运行**全部 {len(unnamed)} 个痛点都未能命名**（LLM 不可用）。"
+            f"⚠️ 本次运行**全部 {len(real)} 个痛点都未能命名**（LLM 不可用）。"
             "卡片的方向列全是「待命名方向」，**请不要据此选题**。"
             "证据链与提及次数仍有参考价值，但方向需要在 LLM 恢复后重跑才能得到。",
         )
@@ -613,6 +628,10 @@ class PainMiner:
         self._vlm_analyzer = None
         self._vlm_cache = None
         self._embedder = None
+        # 警告必须一并清空：close() 会让下一次 mine(deep=True) 重新构造缓存并再
+        # 追加一条同样的警告，留着旧的就会累积成"2 条、3 条…"，而它们说的是同一
+        # 件事。警告列表描述的是**当前这个缓存实例**的状态，实例没了它就该空。
+        self._vlm_cache_warnings.clear()
 
     def __enter__(self) -> PainMiner:
         return self

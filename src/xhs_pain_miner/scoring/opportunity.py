@@ -642,6 +642,7 @@ def build_cards(
     keyword: str = "",
     failed_clusters: Sequence[str] = (),
     min_size: int = 1,
+    include_noise: bool = False,
 ) -> tuple[list[OpportunityCard], list[str]]:
     """为全部簇构造机会卡片。
 
@@ -651,7 +652,13 @@ def build_cards(
         weights: 因子权重，``None`` 时用默认。
         keyword: 品类关键词。
         failed_clusters: 竞品调研失败的簇 id 集合。
-        min_size: 小于该规模的簇不生成卡片（噪声簇通常用 1 保留）。
+        min_size: 小于该规模的簇不生成卡片。
+        include_noise: 是否为「长尾低频痛点」桶（``is_noise``）也生成卡片。
+            **默认 ``False``**：那个桶装的是"没能归入任何已知痛点的发言"，
+            它不是一个可做的方向 —— 给它出卡片会产出「解决「其他痛点」的工具」
+            这类冒充真实机会的条目，而且 ``title`` 会随
+            :meth:`~xhs_pain_miner.models.OpportunityCard.to_public_dict`
+            进上传载荷。它的正确位置是"另有 N 条未归类"的统计，不是机会列表。
 
     Returns:
         ``(卡片列表, 警告列表)``，卡片按分数降序。**权重归一化后与默认权重
@@ -680,7 +687,11 @@ def build_cards(
     # 归一化基准取**全部**簇的最大 size，与 min_size 过滤解耦：调用方调整过滤
     # 阈值时，已经能进报告的卡片分数不该跟着变（否则两次运行没法对比）。
     max_size = max((cluster.size for cluster in clusters), default=0)
-    selected = [cluster for cluster in clusters if cluster.size >= min_size]
+    selected = [
+        cluster
+        for cluster in clusters
+        if cluster.size >= min_size and (include_noise or not cluster.is_noise)
+    ]
 
     # 共用判定只看会进报告的簇（与分数无关，只看标题，所以不受 max_size 影响）。
     shared_templates = _shared_direction_templates(selected)

@@ -335,8 +335,29 @@ def build_units(
             )
             likes.append(comment.likes)
 
+    # ------------------------------------------------------------------ 去重 --
+    # 逐字相同的文本在真实语料里很常见（同一句"我也是，我用也搓泥"被反复粘贴）。
+    # 每条都算一次 ``size``（提及次数）会让这个核心指标虚高，而且**虚高的方向恰好
+    # 是让用户高估某个痛点** —— 一个被水军刷过的话题会显得比真实需求更值得做。
+    #
+    # 两点取舍：
+    # * **保留首次出现的那条**（而不是点赞最高的）：顺序必须稳定可复现，否则
+    #   同一份语料两次运行会得到不同的证据集合。
+    # * **把重复项的点赞数并入首条**：重复本身就是"很多人在说同一句话"的信号，
+    #   直接丢弃会连这个信号一起丢掉。
+    deduped: list[TextUnit] = []
+    position: dict[str, int] = {}
+    for unit in units:
+        index = position.get(unit.text)
+        if index is None:
+            position[unit.text] = len(deduped)
+            deduped.append(unit)
+        else:
+            deduped[index].likes += unit.likes
+
     # 权重在一次调用里统一归一，让"哪条证据更有分量"在整份语料内可比。
     # 逐条调用 compute_weights 只会得到恒等于 1.0 的权重，点赞数这个信号就丢了。
-    for unit, weight in zip(units, compute_weights(likes), strict=True):
+    # 必须在去重**之后**算：合并过的点赞数才是这条证据的真实分量。
+    for unit, weight in zip(deduped, compute_weights([u.likes for u in deduped]), strict=True):
         unit.weight = weight
-    return units
+    return deduped

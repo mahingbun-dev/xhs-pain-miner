@@ -393,3 +393,26 @@ class TestCacheDegradation:
         assert [note for note in second.notes if "缓存不可用" in note], (
             "第二次运行静默了 —— 警告被取走后没有再交付"
         )
+
+    def test_close_does_not_accumulate_warnings(self, tmp_path: Path, broken_db_path: Path):
+        """★ ``close()`` 后重新运行不得让警告**累积**。
+
+        close() 会清掉缓存的引用，于是下一次 ``mine(deep=True)`` 会重新构造缓存、
+        再追加一条**同样**的警告。不一起清空的话，第二次运行会带 2 条、第三次 3 条
+        —— 而它们说的是同一件事，用户读到的是噪声而不是信息。
+        """
+        miner, _ = _miner(tmp_path, db_path=broken_db_path)
+
+        miner.mine("防晒霜", notes_count=_NOTES, deep=True)
+        miner.close()
+        _reinject(miner)
+        second = miner.mine("防晒霜", notes_count=_NOTES, deep=True)
+        miner.close()
+        _reinject(miner)
+        third = miner.mine("防晒霜", notes_count=_NOTES, deep=True)
+
+        counts = [
+            len([note for note in result.notes if "缓存不可用" in note])
+            for result in (second, third)
+        ]
+        assert counts == [1, 1], f"警告在 close 后累积了：{counts}"

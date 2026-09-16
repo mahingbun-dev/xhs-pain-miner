@@ -254,13 +254,133 @@ class TestComputeWeights:
         assert 0.0 < weights[0] < 1.0
 
 
+class TestDeduplication:
+    """逐字相同的文本必须合并 —— 否则 ``size``（提及次数）会虚高。
+
+    提及次数是本产品的核心指标，而虚高的方向恰好是**让用户高估某个痛点**：
+    一个被反复粘贴（甚至被刷）的说法会显得比真实需求更值得做。
+    """
+
+    REPEATED = "跟妆前乳一叠就开始搓泥，只能卸掉重来"
+    OTHER = "油皮涂完必闷闭口，下巴一片小疙瘩"
+
+    def test_identical_comments_are_merged(self):
+        corpus = RawCorpus(
+            keyword="防晒霜",
+            notes=[_note("n1", title="防晒假白到像糊了面粉")],
+            comments=[
+                _comment("c1", "n1", content=self.REPEATED),
+                _comment("c2", "n1", content=self.REPEATED),
+                _comment("c3", "n1", content=self.OTHER),
+            ],
+        )
+        units = build_units(corpus)
+
+        texts = [unit.text for unit in units]
+        assert texts.count(self.REPEATED) == 1, "逐字相同的评论没有被合并"
+        assert len(units) == 3, f"应为 1 笔记 + 2 条去重后的评论，实际 {len(units)}"
+
+    def test_first_occurrence_is_kept(self):
+        """保留**首次出现**的那条 —— 顺序必须稳定可复现。
+
+        若改成保留点赞最高的那条，同一份语料在不同运行里会选出不同的证据，
+        证据链就无法逐字比对了。
+        """
+        corpus = RawCorpus(
+            keyword="防晒霜",
+            notes=[_note("n1", title="防晒假白到像糊了面粉")],
+            comments=[
+                _comment("c1", "n1", content=self.REPEATED, likes=1),
+                _comment("c2", "n1", content=self.REPEATED, likes=9999),
+            ],
+        )
+        units = build_units(corpus)
+        merged = next(unit for unit in units if unit.text == self.REPEATED)
+        assert merged.source == "comment"
+
+        doubled = RawCorpus(
+            keyword="防晒霜",
+            notes=[_note("n1", title="防晒假白到像糊了面粉")],
+            comments=[
+                _comment("c2", "n1", content=self.REPEATED, likes=9999),
+                _comment("c1", "n1", content=self.REPEATED, likes=1),
+            ],
+        )
+        # 调换顺序后仍是"首现"，但因为两条文本相同，合并结果必须一致
+        assert [u.text for u in build_units(doubled)] == [u.text for u in units]
+
+    def test_likes_are_merged_not_dropped(self):
+        """重复项的点赞数要**并入**首条，而不是随重复项一起丢掉。
+
+        重复本身就是"很多人在说同一句话"的信号 —— 直接丢弃会把这个信号也丢掉。
+        """
+        corpus = RawCorpus(
+            keyword="防晒霜",
+            notes=[_note("n1", title="防晒假白到像糊了面粉")],
+            comments=[
+                _comment("c1", "n1", content=self.REPEATED, likes=10),
+                _comment("c2", "n1", content=self.REPEATED, likes=25),
+            ],
+        )
+        units = build_units(corpus)
+        merged = next(unit for unit in units if unit.text == self.REPEATED)
+        assert merged.likes == 35
+
+    def test_cross_source_duplicates_are_merged(self):
+        """笔记正文与评论内容相同时同样合并 —— 去重看的是文本，不是来源。"""
+        shared = "跟妆前乳一叠就开始搓泥，只能卸掉重来"
+        corpus = RawCorpus(
+            keyword="防晒霜",
+            notes=[_note("n1", title=shared, desc="")],
+            comments=[_comment("c1", "n1", content=shared)],
+        )
+        units = build_units(corpus)
+        assert [unit.text for unit in units].count(shared) == 1
+
+    def test_weights_are_computed_after_dedup(self):
+        """权重必须在去重**之后**算：合并过的点赞数才是这条证据的真实分量。
+
+        若先算权重再合并，点赞数变了而权重没跟着变，两者就自相矛盾。
+        """
+        corpus = RawCorpus(
+            keyword="防晒霜",
+            notes=[_note("n1", title="防晒假白到像糊了面粉", likes=100)],
+            comments=[
+                _comment("c1", "n1", content=self.REPEATED, likes=10),
+                _comment("c2", "n1", content=self.REPEATED, likes=10),
+                _comment("c3", "n1", content=self.OTHER, likes=0),
+            ],
+        )
+        units = build_units(corpus)
+        expected = compute_weights([u.likes for u in units])
+        assert [unit.weight for unit in units] == expected
+
+    def test_dedup_is_stable_across_calls(self):
+        corpus = RawCorpus(
+            keyword="防晒霜",
+            notes=[_note("n1", title="防晒假白到像糊了面粉")],
+            comments=[
+                _comment("c1", "n1", content=self.REPEATED),
+                _comment("c2", "n1", content=self.REPEATED),
+            ],
+        )
+        first, second = build_units(corpus), build_units(corpus)
+        assert [u.text for u in first] == [u.text for u in second]
+        assert [u.likes for u in first] == [u.likes for u in second]
+
+
 class TestBuildUnitsOrdering:
     """顺序是契约的第一条不变式：单元 → 向量 → 标签靠下标对应。"""
 
     def test_notes_then_their_comments_in_order(self):
         corpus = RawCorpus(
             keyword="防晒霜",
-            notes=[_note("n1"), _note("n2")],
+            # 两篇笔记的文本必须不同：`build_units` 会按文本去重，而这条测试要验的是
+            # **顺序**，不是去重 —— 用默认内容会让两篇合并成一篇，测的就不是顺序了。
+            notes=[
+                _note("n1", title="防晒假白到像糊了面粉"),
+                _note("n2", title="油皮防晒闷痘实录"),
+            ],
             comments=[
                 _comment("c1", "n1", content="涂完脸比脖子白两个度，出门前得确认三遍"),
                 _comment("c2", "n1", content="跟妆前乳一叠就开始搓泥，只能卸掉重来"),
@@ -275,7 +395,10 @@ class TestBuildUnitsOrdering:
         """★ 评论必须紧跟在所属笔记之后，不能按语料里的物理顺序乱插。"""
         corpus = RawCorpus(
             keyword="防晒霜",
-            notes=[_note("n1"), _note("n2")],
+            notes=[
+                _note("n1", title="防晒假白到像糊了面粉"),
+                _note("n2", title="油皮防晒闷痘实录"),
+            ],
             comments=[
                 _comment("c1", "n2", content="油皮涂完必闷闭口，下巴一片小疙瘩"),
                 _comment("c2", "n1", content="跟妆前乳一叠就开始搓泥，只能卸掉重来"),
@@ -517,8 +640,11 @@ class TestBuildUnitsWeights:
     def test_all_zero_likes_give_uniform_weights(self):
         corpus = RawCorpus(
             keyword="防晒霜",
-            notes=[_note("n1", likes=0)],
-            comments=[_comment("c1", likes=0), _comment("c2", likes=0)],
+            notes=[_note("n1", likes=0, title="笔记标题甲", desc="正文内容甲")],
+            comments=[
+                _comment("c1", likes=0, content="评论内容甲，长度足够通过噪声过滤"),
+                _comment("c2", likes=0, content="评论内容乙，长度足够通过噪声过滤"),
+            ],
         )
         assert [unit.weight for unit in build_units(corpus)] == [1.0, 1.0, 1.0]
 

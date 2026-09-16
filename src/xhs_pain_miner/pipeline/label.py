@@ -482,12 +482,18 @@ def label_clusters(
         的一次调用）的产出，比占位名有价值得多。此时失败的影响面缩小到
         「这个痛点的情感与难度未知」，而不是「整个痛点没有名字」。
     """
-    if not clusters:
+    # 噪声簇（未归类的长尾桶）**不参与命名** —— 它是一个兜底桶，不是某个真实痛点。
+    # 给它起名字会让它冒充一个可做的产品方向（实测会产出「解决「其他痛点」的工具」
+    # 这种卡片，并与真实方向撞名），而且这个假名字会随
+    # :meth:`~xhs_pain_miner.models.OpportunityCard.to_public_dict` 进上传载荷。
+    # 它的正确形态是**保持无名**，只出现在"另有 N 条未归类"的统计里。
+    targets = [cluster for cluster in clusters if not cluster.is_noise]
+    if not targets:
         if progress is not None:
             progress(PROGRESS_STAGE, 1.0)
         return []
 
-    total = len(clusters)
+    total = len(targets)
     # 最少 1 个工作线程：concurrency=0 会让 ThreadPoolExecutor 抛 ValueError，
     # 而"配置成了 0"这种输入失误不该让整次运行崩掉。
     workers = max(1, min(concurrency, total))
@@ -502,11 +508,11 @@ def label_clusters(
             pool.submit(
                 _request_label, cluster, provider=provider, max_evidence=max_evidence
             ): index
-            for index, cluster in enumerate(clusters)
+            for index, cluster in enumerate(targets)
         }
         for future in as_completed(futures):
             index = futures[future]
-            cluster = clusters[index]
+            cluster = targets[index]
             try:
                 result = future.result()
             except Exception as exc:  # noqa: BLE001 —— 单个簇的失败不该中断整批
