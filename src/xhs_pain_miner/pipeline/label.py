@@ -403,14 +403,15 @@ def _apply_label(cluster: PainCluster, label: ClusterLabel, *, keep_labels: bool
     只把值留在 :class:`ClusterLabel` 里等于**白问了一次模型** —— 调用方拿不到它。
 
     Args:
-        keep_labels: 保留簇上已有的名字与摘要，只补情感 / 趋势 / 难度。
+        keep_labels: 保留簇上**已有的非空**名字与摘要，只补情感 / 趋势 / 难度。
 
-            **分类路径下必须为 ``True``**：那里的 ``label`` 来自 LLM 归纳出的
-            痛点清单，而 ``size`` 是按该清单分类算出来的。让本阶段再改一次名，
-            用户看到的痛点名就会与"多少次提及"所依据的那个名字对不上 ——
-            清单与计数必须同源。
+            **判断依据是数据，不是配置。** 分类路径一旦因 LLM 归纳失败降级到
+            聚类（见 ``PainMiner._group_pains``），簇上就没有名字，而配置仍然
+            写着 ``taxonomy`` —— 按配置判断会让**全部**卡片退化成"待命名方向"
+            （实测 34/34）。按"簇上有没有名字"判断才可靠：名字是归纳阶段的
+            产出，它不在，就该由本阶段填。
     """
-    if not keep_labels:
+    if not (keep_labels and cluster.label):
         cluster.label = label.label
         cluster.summary = label.summary
         cluster.category = label.category
@@ -432,10 +433,11 @@ def _degrade(cluster: PainCluster, index: int, *, keep_labels: bool) -> None:
     而实际上毫无依据。评分侧会把 ``None`` 处理成中性值。
 
     Args:
-        keep_labels: 保留簇上已有的名字 —— 分类路径下名字来自归纳阶段（一次
-            **已经成功**的调用），把它换成占位名是净损失。
+        keep_labels: 保留簇上**已有的非空**名字 —— 分类路径下名字来自归纳阶段
+            （一次**已经成功**的调用），把它换成占位名是净损失。簇上没有名字时
+            照常写占位名，理由同 :func:`_apply_label`。
     """
-    if not keep_labels:
+    if not (keep_labels and cluster.label):
         cluster.label = DEGRADED_LABEL_TEMPLATE.format(index=index)
         cluster.summary = ""
         cluster.category = ""

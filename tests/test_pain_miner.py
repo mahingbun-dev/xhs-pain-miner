@@ -179,6 +179,26 @@ def _miner(**setting_overrides: object) -> PainMiner:
     )
 
 
+def _miner_with_broken_llm() -> PainMiner:
+    """构造一台 LLM 完全不可用的 PainMiner —— 用于验证降级路径。
+
+    归纳阶段失败会让 ``_group_pains`` 退回聚类路径；而聚类路径的命名同样依赖
+    LLM，所以这里代表的是"LLM 彻底宕机"这一最坏情形。
+    """
+
+    class _BrokenLLM(_FakeLLM):
+        def complete(self, messages, **kwargs):  # type: ignore[no-untyped-def]
+            raise LLMError("模拟服务不可用")
+
+    settings = _settings(collector_backend="fixture", research_enabled=False)
+    return PainMiner(
+        settings=settings,
+        llm=_BrokenLLM(),
+        vlm=_BrokenLLM(),
+        embedder=_FakeEmbedder(),
+    )
+
+
 class TestPainMinerFacade:
     """门面类。"""
 
@@ -256,6 +276,36 @@ class TestPainMinerFacade:
             sources = [ev.text for ev in card.pain.evidences]
             overlap = find_verbatim_overlap(card.pain.label, sources, min_len=6)
             assert overlap is None, f"降级标签回抄了原文：{overlap!r}"
+
+    def test_degraded_to_clustering_still_fills_names(self):
+        """★ 降级到聚类路径后，簇名仍必须被填上。
+
+        这里曾经有个真 bug：``keep_labels`` 判的是**配置**（``taxonomy``）而不是
+        **实际走的路径**。归纳失败降级到聚类后，簇上本来就没有名字，而
+        ``keep_labels=True`` 让标注阶段也不去填 —— 实测 34/34 张卡片退化成占位名
+        甚至空名。
+
+        修法是让 ``label.py`` 按**数据**判断（簇上有没有名字），而不是按配置。
+        """
+        result = _miner_with_broken_llm().mine("防晒霜", notes_count=40)
+
+        assert result.cards
+        assert any("已降级为聚类模式" in note for note in result.notes)
+        assert all(card.pain.label for card in result.cards), "降级后仍有簇没有名字"
+
+    def test_all_unnamed_warns_against_picking_topics(self):
+        """★ 所有痛点都没命名时，必须明确劝阻用户据此选题。
+
+        降级到聚类后命名同样依赖 LLM；LLM 依然不可用时每个簇只剩占位名，而占位名
+        生成不出方向标题（不变式 5），于是「方向」一列全是"待命名方向"。此时
+        证据链仍有价值，但方向毫无意义 —— 不告知的话用户会以为真有几十个叫
+        "待命名方向"的机会。
+        """
+        result = _miner_with_broken_llm().mine("防晒霜", notes_count=40)
+
+        first = result.notes[0] if result.notes else ""
+        assert "未能命名" in first, f"警告必须排在最前面，实际首条是: {first!r}"
+        assert "请不要据此选题" in first
 
     def test_mine_announces_disabled_research(self):
         """关闭竞品调研必须留下痕迹 —— 静默关闭会让用户以为查过了。"""
@@ -646,6 +696,49 @@ class TestSaveErrors:
         )
         assert result.exit_code == 1
         assert "无法写入" in _combined(result)
+
+
+class TestCliSummaryMatchesReport:
+    """终端摘要必须与报告展示同一批卡片。
+
+    噪声簇（长尾低频）的 ``label`` 是空的，会被 ``_direction_title`` 渲染成
+    "待命名方向"；而它又常常因为 ``size`` 大而排在第一位 —— 于是终端的第一行
+    变成「最大的机会：待命名方向」，而 HTML 报告里根本没有这张卡片（渲染层默认
+    ``include_noise=False``）。两处不一致会让用户以为自己看漏了。
+    """
+
+    def test_noise_is_not_listed_as_a_card(self, monkeypatch: pytest.MonkeyPatch):
+        """★ 噪声簇不得作为机会卡片出现在终端摘要里，但要如实告知条数。"""
+        import io
+
+        from rich.console import Console
+
+        from xhs_pain_miner import cli as cli_module
+        from xhs_pain_miner.models import MiningResult, OpportunityCard, PainCluster
+
+        buffer = io.StringIO()
+        monkeypatch.setattr(cli_module, "console", Console(file=buffer, width=200))
+
+        noise = PainCluster(id="pain-noise", size=173, is_noise=True)
+        real = PainCluster(id="pain-1", label="搓泥", size=237)
+        result = MiningResult(
+            keyword="防晒霜",
+            cards=[
+                OpportunityCard(id="c1", title="防晒霜 · 待命名方向", pain=noise, score=88.0),
+                OpportunityCard(
+                    id="c2", title="防晒霜 · 解决「搓泥」的工具", pain=real, score=80.0
+                ),
+            ],
+            clusters=[noise, real],
+        )
+
+        cli_module._render_result(result)
+        output = buffer.getvalue()
+
+        assert "待命名方向" not in output, "噪声簇被当成机会卡片显示了"
+        assert "解决「搓泥」的工具" in output, "真实卡片应当显示"
+        assert "173" in output, "未归类的条数必须如实告知，不能悄悄丢掉"
+        assert "1 张机会卡片" in output, "卡片数不该把噪声簇算进去"
 
 
 class TestDoctorHasNoSideEffects:

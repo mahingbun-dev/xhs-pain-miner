@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import time
 from typing import TYPE_CHECKING
 
@@ -34,7 +35,7 @@ from xhs_pain_miner.pipeline.cluster import cluster_units, group_by_taxonomy, gr
 from xhs_pain_miner.pipeline.embed import build_embedder
 from xhs_pain_miner.pipeline.label import label_clusters
 from xhs_pain_miner.pipeline.taxonomy import assign_units
-from xhs_pain_miner.pipeline.vlm import VlmAnalyzer
+from xhs_pain_miner.pipeline.vlm import SqliteVlmCache, VlmAnalyzer
 from xhs_pain_miner.research.github import research_cluster
 from xhs_pain_miner.scoring.opportunity import build_cards
 
@@ -92,6 +93,30 @@ def normalize_keyword(keyword: str) -> str:
     return cleaned
 
 
+def _warn_if_nothing_was_named(clusters: Sequence[PainCluster], messages: list[str]) -> None:
+    """所有痛点都没能命名时，在提示列表最前面插入一条醒目警告。
+
+    这种情况出现在降级路径上：归纳失败 → 退回聚类 → 而聚类同样依赖 LLM 命名，
+    LLM 依然不可用时每个簇只剩占位名。占位名不能让
+    :func:`~xhs_pain_miner.scoring.opportunity._direction_title` 生成方向
+    （不变式 5：标题会进上传载荷，不得取自原文），于是卡片的"方向"一列会
+    **全部**退化成"待命名方向"。
+
+    此时证据链、提及次数、机会分仍有参考价值，但"方向"这一列毫无意义。
+    不告知的话，用户要么以为报告坏了，要么更糟 —— 以为真有几十个叫
+    "待命名方向"的机会。
+    """
+    unnamed = [c for c in clusters if not c.is_noise and c.label.startswith("<")]
+    named = [c for c in clusters if not c.is_noise and not c.label.startswith("<")]
+    if unnamed and not named:
+        messages.insert(
+            0,
+            f"⚠️ 本次运行**全部 {len(unnamed)} 个痛点都未能命名**（LLM 不可用）。"
+            "卡片的方向列全是「待命名方向」，**请不要据此选题**。"
+            "证据链与提及次数仍有参考价值，但方向需要在 LLM 恢复后重跑才能得到。",
+        )
+
+
 class PainMiner:
     """痛点挖掘的主入口。
 
@@ -143,6 +168,11 @@ class PainMiner:
         self._llm: BaseLLMProvider | None = llm
         self._vlm: BaseLLMProvider | None = vlm
         self._vlm_analyzer: VlmAnalyzer | None = None
+        self._vlm_cache: SqliteVlmCache | None = None
+        # 缓存构造失败时的降级说明。**不能当场抛**（缓存是省钱手段，不是必需依赖），
+        # 也不能只写进日志（用户看不到）—— 攒起来由 _analyze_images 交付到
+        # MiningResult.notes，让"这次没有缓存、会重复计费"出现在产物上。
+        self._vlm_cache_warnings: list[str] = []
         self._embedder: Embedder | None = embedder
 
     # ------------------------------------------------------------------ 采集 --
@@ -274,12 +304,14 @@ class PainMiner:
                 clusters,
                 provider=self._get_llm(),
                 concurrency=self.settings.llm_max_concurrency,
-                # 分类路径下 label 来自归纳清单，而 size 正是按该清单分类算出来的。
-                # 让本阶段改名，用户看到的痛点名就会与"多少次提及"所依据的那个
-                # 名字对不上 —— 清单与计数必须同源。
+                # keep_labels 的语义是「保留簇上**已有的非空**名字」—— 由 label.py
+                # 按数据判断，而不是按这里的配置。分类路径一旦因归纳失败降级到聚类，
+                # 簇上就没有名字，而配置仍写着 taxonomy：按配置判断会让全部卡片
+                # 退化成占位名。
                 keep_labels=self.settings.pain_discovery == "taxonomy",
             )
         )
+        _warn_if_nothing_was_named(clusters, messages)
 
         # -------------------------------------------------------- 7. 竞品调研 --
         notify("竞品调研", 0.75)
@@ -413,8 +445,17 @@ class PainMiner:
             # 只是卡片上会少掉视觉证据。
             return [], [f"已按你的选择跳过图片分析。预估为：{estimate.summary()}"]
 
+        # 缓存的降级警告在这里交付：缓存是在 _get_vlm_analyzer() 里构造的，
+        # 而那条路径也可能被 estimate_vlm_cost() 先走到（CLI 就是先预估再分析），
+        # 所以警告要攒到**真正要跑图片分析**这一刻再取 —— 跳过图片分析时
+        # 缓存压根没被用到，报它只会是噪声。
+        # 缓存不可用的说明**每次都带上，不取走**：缓存只在构造分析器时尝试建立
+        # 一次，失败后不会重试 —— 取走的话第二次运行就静默了，而"这次仍然没有
+        # 缓存、仍然会重复计费"这个事实并没有变。成本异常静默化比重复提示更糟。
+        messages = list(self._vlm_cache_warnings)
+
         result = analyzer.analyze(corpus)
-        return result.units, result.warnings
+        return result.units, messages + result.warnings
 
     def _research_clusters(
         self,
@@ -490,18 +531,58 @@ class PainMiner:
         return self._llm
 
     def _get_vlm_analyzer(self) -> VlmAnalyzer:
-        """图片分析器（惰性构造并复用）。"""
+        """图片分析器（惰性构造并复用）。
+
+        .. important::
+           缓存的**所有权在本类**：:class:`~xhs_pain_miner.pipeline.vlm.VlmAnalyzer`
+           只是持有引用、不负责关闭它。由构造方释放才不会漏连接 —— analyzer 的
+           生命周期可以短于缓存（同一份缓存跨多次运行才有价值），反过来由它
+           关闭会让"再次运行"拿到一个已经关掉的连接。
+        """
         if self._vlm is None:
             self._vlm = build_provider(self.settings, purpose="vision")
         if self._vlm_analyzer is None:
+            self._vlm_cache = self._build_vlm_cache()
             self._vlm_analyzer = VlmAnalyzer(
                 self._vlm,
+                # 省钱第 4 条（结果按内容哈希缓存）就落在这里：没有这一行，
+                # 文档承诺的"第二次跑同一品类成本近乎归零"完全不成立。
+                cache=self._vlm_cache,
                 max_edge=self.settings.vlm_image_max_edge,
                 max_images_per_note=self.settings.vlm_max_images_per_note,
                 max_calls=self.settings.max_vlm_calls,
                 max_concurrency=self.settings.vlm_max_concurrency,
             )
         return self._vlm_analyzer
+
+    def _build_vlm_cache(self) -> SqliteVlmCache | None:
+        """打开 VLM 结果缓存。**任何失败都降级为"不缓存"并留下警告，绝不抛出。**
+
+        缓存是省钱手段而不是必需依赖，与 :mod:`~xhs_pain_miner.pipeline.vlm` 的
+        「失败降级」原则一致：打不开它（目录不可写、磁盘满、路径被别的文件占住）
+        不该让整次分析崩掉 —— 但降级必须如实告知，因为"没有缓存"意味着同一张图
+        会在后续每一次运行里重复计费，用户有权知道这个成本差异。
+
+        Returns:
+            可用的缓存；打不开时为 ``None``。
+        """
+        path = self.settings.db_path
+        try:
+            # 这一次 mkdir 是**冗余的**：``SqliteVlmCache.__init__`` 自己会建父目录。
+            # 保留它的唯一理由是异常归属 —— 建目录失败（父路径被文件占住、无写权限）
+            # 与建好了但打不开是两类问题，让它们都从这一个 try 里以 ``OSError`` /
+            # ``sqlite3.Error`` 的形式冒出来，下游的降级分支与警告文案就能统一处理，
+            # 不必区分异常是来自本函数还是来自 vlm 模块。
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # SqliteVlmCache 收的是字符串路径，而 settings.db_path 是 Path。
+            return SqliteVlmCache(str(path))
+        except (sqlite3.Error, OSError) as exc:
+            self._vlm_cache_warnings.append(
+                f"VLM 结果缓存不可用（{type(exc).__name__}: {exc}），本次运行不做缓存 —— "
+                "语料里重复出现的图片会在后续运行中重复计费。"
+                f"请检查 {path} 所在目录是否存在且可写。"
+            )
+            return None
 
     def _get_embedder(self) -> Embedder:
         """向量编码器（惰性构造并复用）。"""
@@ -510,16 +591,27 @@ class PainMiner:
         return self._embedder
 
     def close(self) -> None:
-        """释放 LLM 连接、编码器与模型占用的内存。"""
+        """释放 LLM 连接、编码器、VLM 缓存与模型占用的内存。
+
+        Note:
+            缓存连接在这里被关闭并**清空引用**，所以关闭之后再调用 :meth:`mine`
+            （或 :meth:`estimate_vlm_cost`）会重新打开一个可用实例 ——
+            反复运行不会撞上 "Cannot operate on a closed database"。
+        """
         if self._llm is not None:
             self._llm.close()
         if self._vlm is not None:
             self._vlm.close()
+        if self._vlm_cache is not None:
+            # 缓存归 PainMiner 持有（见 _get_vlm_analyzer 的说明），
+            # analyzer 被丢弃时不会替我们关连接，必须在这里显式关。
+            self._vlm_cache.close()
         if self._embedder is not None:
             self._embedder.close()
         self._llm = None
         self._vlm = None
         self._vlm_analyzer = None
+        self._vlm_cache = None
         self._embedder = None
 
     def __enter__(self) -> PainMiner:

@@ -690,3 +690,117 @@ class TestBuildCards:
         assert [(card.id, card.score, card.title) for card in first] == [
             (card.id, card.score, card.title) for card in second
         ]
+
+
+class TestTitleUniqueness:
+    """★ 卡片标题必须两两不同 —— 卡片是本产品的核心交付物，用户看的就是标题。
+
+    方向模板只有六个，匹配规则却很宽松（"难"一个字就能吃掉所有含"难"的痛点名），
+    所以多个痛点命中同一个模板是常态。一旦共用，标题就会撞名，报告里出现几张
+    一模一样的卡片，用户无法区分 —— 修复前实测 4 个不同痛点全部得到
+    「防晒霜 · 零门槛的工具」。
+
+    契约：模板被**多个**痛点共用时，这些痛点**全部**退回默认模板
+    ``解决「{label}」的工具``（自带痛点名，天然唯一）；只有独占模板的才用它。
+    """
+
+    KEYWORD = "防晒霜"
+
+    def titles_by_label(self, clusters: list[PainCluster]) -> dict[str, str]:
+        cards, _ = build_cards(clusters, findings_by_cluster={}, keyword=self.KEYWORD)
+        assert len(cards) == len(clusters), "所有簇都该生成卡片"
+        return {card.pain.label: card.title for card in cards}
+
+    def build(self, labels: list[str]) -> list[PainCluster]:
+        return [
+            cluster(id_=f"p{index}", label=label, size=len(labels) * 2 - index)
+            for index, label in enumerate(labels)
+        ]
+
+    def test_shared_template_is_dropped_for_every_holder(self):
+        """共用一个模板的三个痛点全部退回默认模板 —— 不是只有后来者退。"""
+        labels = ["难卸妆", "包装难用", "上手门槛高"]
+        titles = self.titles_by_label(self.build(labels))
+
+        assert len(set(titles.values())) == 3, f"标题撞名: {titles}"
+        assert set(titles.values()) == {
+            f"{self.KEYWORD} · 解决「{label}」的工具" for label in labels
+        }
+
+    def test_lone_holder_keeps_its_template(self):
+        """独占模板的痛点照旧用模板措辞 —— 唯一化不能把所有标题都降级成默认。"""
+        titles = self.titles_by_label(self.build(["难卸妆", "包装难用", "价格虚高"]))
+
+        assert titles["价格虚高"] == f"{self.KEYWORD} · 更低成本的工具"
+        assert titles["难卸妆"] == f"{self.KEYWORD} · 解决「难卸妆」的工具"
+        assert titles["包装难用"] == f"{self.KEYWORD} · 解决「包装难用」的工具"
+
+    def test_the_four_pains_from_the_bug_report_all_get_distinct_titles(self):
+        """★ 回归守卫：修复前这四个痛点全部得到「防晒霜 · 零门槛的工具」。"""
+        titles = self.titles_by_label(
+            self.build(["难卸妆", "包装难用", "不会选色号", "上手门槛高"])
+        )
+
+        assert len(set(titles.values())) == 4, f"标题撞名: {titles}"
+
+    def test_default_template_holders_need_no_fallback(self):
+        """默认模板自带 label，两个痛点共用也不会撞名 —— 不该被无谓地改写。"""
+        titles = self.titles_by_label(self.build(["假白泛白", "搓泥"]))
+
+        assert titles == {
+            "假白泛白": f"{self.KEYWORD} · 解决「假白泛白」的工具",
+            "搓泥": f"{self.KEYWORD} · 解决「搓泥」的工具",
+        }
+
+    def test_single_holder_is_unchanged(self):
+        """不回归：只有一个痛点命中模板时行为与修复前完全一致。"""
+        assert self.titles_by_label(self.build(["导出太麻烦"])) == {
+            "导出太麻烦": f"{self.KEYWORD} · 更省事的工具"
+        }
+        assert self.titles_by_label(self.build(["闷痘闭口"])) == {
+            "闷痘闭口": f"{self.KEYWORD} · 解决「闷痘闭口」的工具"
+        }
+
+    def test_degraded_cluster_still_gets_pending_direction(self):
+        """降级簇既不共用模板、也不回退 —— 回退会把占位名拼进标题（不变式 5）。
+
+        它的标题里根本没有那个模板，因此也**不占**模板名额：旁边的痛点照旧用
+        「零门槛」，不被无谓地拖回默认模板。
+        """
+        titles = self.titles_by_label(self.build(["难卸妆", "<未命名痛点 #3>"]))
+
+        pending = titles["<未命名痛点 #3>"]
+        assert pending == f"{self.KEYWORD} · 待命名方向"
+        assert "未命名" not in pending and "<" not in pending
+        assert titles["难卸妆"] == f"{self.KEYWORD} · 零门槛的工具"
+
+    def test_filtered_clusters_do_not_count_as_holders(self):
+        """被 min_size 滤掉的簇根本不出现在报告里，不该把标题"拖"回默认模板。"""
+        clusters = [
+            cluster(id_="big", label="难卸妆", size=10),
+            cluster(id_="tiny", label="包装难用", size=1),
+        ]
+        cards, _ = build_cards(clusters, findings_by_cluster={}, keyword=self.KEYWORD, min_size=5)
+
+        assert [card.pain.label for card in cards] == ["难卸妆"]
+        assert cards[0].title == f"{self.KEYWORD} · 零门槛的工具"
+
+    def test_fallback_does_not_depend_on_cluster_order(self):
+        """★ 为什么不是"先到先得"：那样顺序一变就换人拿模板。
+
+        簇的顺序来自 ``size`` 降序，而语料稍有变化 size 就会变 —— 同一份需求
+        两次分析得到两份措辞不同的报告。全退与顺序无关。
+        """
+        clusters = self.build(["难卸妆", "包装难用", "价格虚高"])
+
+        forward = self.titles_by_label(clusters)
+        backward = self.titles_by_label(list(reversed(clusters)))
+
+        assert forward == backward
+
+    def test_no_keyword_still_yields_unique_titles(self):
+        """没有品类关键词时标题没有前缀，唯一性不能因此失效。"""
+        labels = ["难卸妆", "包装难用", "不会选色号"]
+        cards, _ = build_cards(self.build(labels), findings_by_cluster={})
+
+        assert len({card.title for card in cards}) == 3

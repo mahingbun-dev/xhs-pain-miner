@@ -54,7 +54,8 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections import Counter
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -233,7 +234,19 @@ _DIRECTION_PATTERNS: tuple[tuple[tuple[str, ...], str], ...] = (
 
 _DEFAULT_DIRECTION = "解决「{label}」的工具"
 """通用方向模板。措辞刻意保持中性 —— 它要能套在"假白泛白""导入麻烦"等
-任意痛点名上而不产生荒谬的组合。"""
+任意痛点名上而不产生荒谬的组合。
+
+它同时是**标题唯一化的兜底**：模板里含 ``{label}``，所以不同痛点名必然得到
+不同标题（见 :func:`_shared_direction_templates`）。
+"""
+
+_DEGRADED_DIRECTION = "待命名方向"
+"""降级簇（占位名形如 ``<未命名痛点 #3>``）的方向名。
+
+刻意**不含** ``{label}``：降级簇的"名字"本身就是个占位符，套进标题等于把占位符
+当痛点名用（不变式 5）。也因此它不能参与标题唯一化的回退 —— 退回默认模板会
+把 ``<未命名痛点 #3>`` 拼进标题。
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -466,7 +479,67 @@ def feasibility_score(cluster: PainCluster) -> float:
     return _clamp((5.0 - _clamp(float(difficulty), 1.0, 5.0)) / 4.0)
 
 
-def _direction_title(cluster: PainCluster, keyword: str) -> str:
+def _direction_template(label: str) -> str:
+    """由痛点名选出方向模板（不含品类前缀）。
+
+    **纯函数**：同一个 ``label`` 永远得到同一个模板 —— 标题必须可复现。
+
+    单独抽出来是为了让 :func:`build_cards` 能先数一遍"哪个模板被几个痛点共用"，
+    再决定要不要把这些痛点退回默认模板。见 :func:`_shared_direction_templates`。
+    """
+    cleaned = label.strip()
+    if not cleaned or cleaned.startswith("<"):
+        return _DEGRADED_DIRECTION
+    for markers, template in _DIRECTION_PATTERNS:
+        if any(marker in cleaned for marker in markers):
+            return template
+    return _DEFAULT_DIRECTION
+
+
+def _shared_direction_templates(clusters: Sequence[PainCluster]) -> frozenset[str]:
+    """被**多个**痛点共用的方向模板。
+
+    匹配规则刻意宽松（"难"一个字就能吃掉所有含"难"的痛点名），模板又只有六个，
+    因此多个痛点命中同一个模板是常态而不是异常。共用同一个模板意味着**标题
+    撞名** —— 报告里出现几张一模一样的卡片，用户无法区分。
+
+    Args:
+        clusters: **会真正出现在报告里**的簇（``build_cards`` 传的是过滤后的
+            ``selected``）。被 ``min_size`` 滤掉的簇不参与判定，否则它们会把
+            标题"拖"回默认模板，而用户根本看不到它们，只觉得措辞莫名其妙。
+
+    Returns:
+        需要让出模板的集合，回退动作由 :func:`_effective_direction_template` 执行。
+        :data:`_DEFAULT_DIRECTION` 与 :data:`_DEGRADED_DIRECTION` 永远不在其中：
+        前者自带 ``{label}``，共用也不会撞名；后者没有更好的替代（见其文档）。
+    """
+    counts = Counter(_direction_template(cluster.label) for cluster in clusters)
+    return frozenset(
+        template
+        for template, count in counts.items()
+        if count > 1 and template not in (_DEFAULT_DIRECTION, _DEGRADED_DIRECTION)
+    )
+
+
+def _effective_direction_template(cluster: PainCluster, shared: Collection[str]) -> str:
+    """该簇最终使用的方向模板。
+
+    **共用即全部退回**：一个模板只要被多个痛点命中，这些痛点就**全部**回到
+    :data:`_DEFAULT_DIRECTION`，只有独占模板的痛点才用它。
+
+    为什么不是"先到先得"（第一个命中的保留模板、其余退回）：谁先到取决于簇的
+    顺序（按 ``size`` 降序），语料稍有变化就会换人拿到那个标题 —— 同一份需求
+    两次分析得到两份措辞不同的报告。全退则**与顺序无关**，只与"有几个痛点命中
+    它"有关，结果稳定。
+
+    副作用是常用模板会集体让位（含"难"的痛点全都用默认模板）。这是刻意的：
+    标题的职责是让用户在列表里**区分**这几张卡片，而不是给最常见的痛点发奖。
+    """
+    template = _direction_template(cluster.label)
+    return _DEFAULT_DIRECTION if template in shared else template
+
+
+def _direction_title(cluster: PainCluster, keyword: str, *, template: str | None = None) -> str:
     """由痛点名推导"可做的产品方向"。
 
     **标题不是痛点描述**：``cluster.label`` 回答"用户卡在哪"，标题回答"要做什么"。
@@ -474,17 +547,18 @@ def _direction_title(cluster: PainCluster, keyword: str) -> str:
 
     降级的簇（占位名形如 ``<未命名痛点 #3>``）不得拿原文当标题（不变式 5），
     只能给一个明确标注为待补的方向名。
+
+    Args:
+        cluster: 痛点簇。
+        keyword: 品类关键词，作为标题前缀。
+        template: 方向模板。``None`` 时按 :func:`_direction_template` 从痛点名
+            推导；``build_cards`` 会传入 ``_DEFAULT_DIRECTION`` 来消解撞名
+            （见 :func:`_shared_direction_templates`）。
     """
     domain = keyword.strip()
     label = cluster.label.strip()
-    if not label or label.startswith("<"):
-        direction = "待命名方向"
-    else:
-        direction = _DEFAULT_DIRECTION.format(label=label)
-        for markers, template in _DIRECTION_PATTERNS:
-            if any(marker in label for marker in markers):
-                direction = template.format(label=label)
-                break
+    resolved = _direction_template(cluster.label) if template is None else template
+    direction = resolved.format(label=label)
     return f"{domain} · {direction}" if domain else direction
 
 
@@ -496,6 +570,7 @@ def build_card(
     keyword: str,
     max_size: int,
     research_failed: bool = False,
+    direction_template: str | None = None,
 ) -> OpportunityCard:
     """为单个簇构造机会卡片。
 
@@ -506,6 +581,9 @@ def build_card(
         keyword: 品类关键词。
         max_size: 归一化基准（最大簇的 size）。
         research_failed: 该簇的竞品调研是否失败。
+        direction_template: 标题用的方向模板；``None`` 时按痛点名推导。
+            **只有** :func:`build_cards` 需要传它 —— 标题唯一性是整份报告的性质，
+            单张卡片看不到自己的兄弟（见该函数里的"标题唯一化"一节）。
 
     Returns:
         填好 ``score`` 与 ``score_breakdown`` 的卡片。
@@ -528,7 +606,7 @@ def build_card(
     weighted = sum(factor_weights[name] * breakdown[name] for name in FACTOR_NAMES)
     return OpportunityCard(
         id=f"card-{cluster.id}",
-        title=_direction_title(cluster, keyword),
+        title=_direction_title(cluster, keyword, template=direction_template),
         pain=cluster,
         competitors=list(findings),
         score=round(_clamp(weighted * 100.0, 0.0, 100.0), 1),
@@ -578,6 +656,17 @@ def build_cards(
     Returns:
         ``(卡片列表, 警告列表)``，卡片按分数降序。**权重归一化后与默认权重
         差异过大时要产生警告**，否则用户改了一个不起作用的权重却以为生效了。
+
+    Note:
+        **标题唯一化在这一层做**。方向模板只有六个而匹配规则很宽松
+        （"难"一个字就能吃掉所有含"难"的痛点名），共用模板是常态；一旦共用，
+        几张卡片的标题就会一模一样，用户在报告里无法区分它们 —— 而卡片是本产品
+        的核心交付物。共用的模板一律让位给 :data:`_DEFAULT_DIRECTION`
+        （自带 ``{label}``，天然唯一），只有独占模板的痛点才用模板措辞。
+
+        为什么放在这里而不是 :func:`_direction_title` 里：唯一性是**整份报告**的
+        性质，单张卡片不知道自己还有哪些兄弟，无从判断"我命中的模板是不是被
+        别人也命中了"。``build_card`` 因此只多接一个已算好的模板参数。
     """
     effective_weights = weights if weights is not None else ScoreWeights()
     normalized = effective_weights.normalized()
@@ -593,6 +682,9 @@ def build_cards(
     max_size = max((cluster.size for cluster in clusters), default=0)
     selected = [cluster for cluster in clusters if cluster.size >= min_size]
 
+    # 共用判定只看会进报告的簇（与分数无关，只看标题，所以不受 max_size 影响）。
+    shared_templates = _shared_direction_templates(selected)
+
     cards = [
         build_card(
             cluster,
@@ -601,6 +693,7 @@ def build_cards(
             keyword=keyword,
             max_size=max_size,
             research_failed=cluster.id in failed,
+            direction_template=_effective_direction_template(cluster, shared_templates),
         )
         for cluster in selected
     ]

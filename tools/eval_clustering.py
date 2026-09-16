@@ -23,14 +23,24 @@ M1 实测结论（2026-09，bge-small-zh + fixture 语料 1142 条）
 ========================================  ========  ==========  =========
 方案                                       准确率     coverage    size_mae
 ========================================  ========  ==========  =========
-HDBSCAN mcs=3                               0.996      0.107       0.947
+HDBSCAN mcs=3                               0.996      0.095       0.947
 KMeans k=10                                 0.532      0.537        —
-两阶段（HDBSCAN + 质心合并到 10 组）          0.339      0.766        —
+两阶段（HDBSCAN + 质心合并到 10 组）          0.339      0.766*       —
 **LLM 归纳 + embedding 分类（10% 打标）**     **0.803**    —          —
 ========================================  ========  ==========  =========
 
+.. note::
+   ``coverage`` 一列统一由
+   :func:`~xhs_pain_miner.pipeline.cluster.cluster_quality` 给出，口径是
+   **噪声（``-1``）不算一个簇**。本脚本早期自实现过一套计算，它把噪声也当作簇，
+   于是 HDBSCAN 行的 coverage 被噪声抬高（mcs=3 时算出 0.107，正确值 0.095）。
+   KMeans 不产生噪声点，两种口径数值恰好相同 —— 所以当时"两套实现结果一致"的
+   结论只在无噪声的标签上成立。带 ``*`` 的「两阶段」一行为早期一次性探索的结果，
+   当前脚本无法复现，其 coverage 很可能存在同样的虚高，仅供参考。
+
 **结论：聚类这条路走不通。** 同主题相似度 0.62 对跨主题 0.56 —— 信噪比只有
-0.06，任何聚类算法都只能在 purity 与 coverage 之间二选一。换 bge-large-zh
+0.06（这两组数字取自下面第 1 节的手写对照语料；合成语料是 0.087，同样很低）。
+任何聚类算法都只能在 purity 与 coverage 之间二选一。换 bge-large-zh
 （1.3GB）只把信噪比提到 0.08，不够。
 
 而「分类」是另一个问题：给定已知的痛点清单，判断"这条讲的是哪个"只需相对比较。
@@ -56,7 +66,7 @@ from sklearn.cluster import KMeans  # noqa: E402
 from xhs_pain_miner.collectors.fixture import FixtureBackend  # noqa: E402
 from xhs_pain_miner.models import TextUnit  # noqa: E402
 from xhs_pain_miner.pipeline.clean import build_units  # noqa: E402
-from xhs_pain_miner.pipeline.cluster import cluster_units  # noqa: E402
+from xhs_pain_miner.pipeline.cluster import cluster_quality, cluster_units  # noqa: E402
 from xhs_pain_miner.pipeline.embed import LocalEmbedder, _normalize  # noqa: E402
 
 NATURAL: dict[str, list[str]] = {
@@ -151,23 +161,13 @@ def signal_to_noise(vectors: list[list[float]], truth: list[str]) -> float:
     return statistics.mean(intra) - statistics.mean(cross)
 
 
-def scoring(truth: list[str], labels: list[int]) -> tuple[float, float, int]:
-    """返回 ``(purity, coverage, 簇数)`` —— 口径与 ``cluster_quality`` 一致。"""
-    purity_num = purity_den = 0
-    for cluster in {x for x in labels if x != -1}:
-        members = [truth[i] for i, x in enumerate(labels) if x == cluster]
-        purity_num += collections.Counter(members).most_common(1)[0][1]
-        purity_den += len(members)
+def cluster_count(labels: list[int]) -> int:
+    """非噪声簇的数量。
 
-    groups: dict[str, list[int]] = collections.defaultdict(list)
-    for i, tag in enumerate(truth):
-        groups[tag].append(labels[i])
-
-    return (
-        purity_num / purity_den if purity_den else 0.0,
-        sum(collections.Counter(v).most_common(1)[0][1] for v in groups.values()) / len(truth),
-        len({x for x in labels if x != -1}),
-    )
+    ``cluster_quality`` 只返回纯度类指标、不返回簇数，而第二节的表要展示它
+    （"171 个簇 vs 10 个真实痛点"正是这条路线被否掉的直接证据）。
+    """
+    return len({x for x in labels if x != -1})
 
 
 def classify_accuracy(
@@ -248,15 +248,18 @@ def size_error(predicted: collections.Counter, truth: collections.Counter) -> di
     }
 
 
-def _load_fixture() -> tuple[list[list[float]], list[str], list[str]]:
+def _load_fixture() -> tuple[list[TextUnit], list[list[float]]]:
+    """返回 ``(units, vectors)``。
+
+    返回 ``units`` 而不只是标签，是因为质量指标统一走
+    :func:`~xhs_pain_miner.pipeline.cluster.cluster_quality` —— 它的入参就是带
+    ``truth_label`` 的 ``TextUnit``。评估脚本自己再实现一套口径（哪怕当下数值
+    一致）会在 ``cluster_quality`` 调整时静默漂移，而这些数字要写进验收报告。
+    """
     corpus = FixtureBackend().collect("防晒霜", limit=300, max_comments_per_note=20)
     units: list[TextUnit] = build_units(corpus, max_comments_per_note=20)
     embedder = LocalEmbedder("BAAI/bge-small-zh-v1.5")
-    return (
-        embedder.encode([u.text for u in units]),
-        [u.truth_label for u in units],
-        [u.text for u in units],
-    )
+    return units, embedder.encode([u.text for u in units])
 
 
 def _load_natural() -> tuple[list[list[float]], list[str]]:
@@ -272,7 +275,8 @@ def main() -> int:
     print("=" * 68)
     print("一、语义信噪比（同主题相似度 − 跨主题相似度）")
     print("=" * 68)
-    fixture_vectors, fixture_truth, _ = _load_fixture()
+    fixture_units, fixture_vectors = _load_fixture()
+    fixture_truth = [u.truth_label for u in fixture_units]
     natural_vectors, natural_truth = _load_natural()
     fixture_snr = signal_to_noise(fixture_vectors, fixture_truth)
     natural_snr = signal_to_noise(natural_vectors, natural_truth)
@@ -287,13 +291,21 @@ def main() -> int:
     print(f"  {'方案':<34}{'purity':>8}{'coverage':>10}{'簇数':>7}")
     for mcs in (3, 5, 8):
         labels = cluster_units(fixture_vectors, min_cluster_size=mcs, min_samples=1)
-        p, c, n = scoring(fixture_truth, labels)
-        print(f"  {'HDBSCAN min_cluster_size=' + str(mcs):<34}{p:>8.3f}{c:>10.3f}{n:>7}")
+        quality = cluster_quality(fixture_units, labels)
+        print(
+            f"  {'HDBSCAN min_cluster_size=' + str(mcs):<34}"
+            f"{quality['purity']:>8.3f}{quality['coverage']:>10.3f}"
+            f"{cluster_count(labels):>7}"
+        )
     for k in (10, 15):
         matrix = np.asarray(fixture_vectors)
         labels = KMeans(n_clusters=k, n_init=10, random_state=0).fit_predict(matrix).tolist()
-        p, c, n = scoring(fixture_truth, labels)
-        print(f"  {'KMeans k=' + str(k):<34}{p:>8.3f}{c:>10.3f}{n:>7}")
+        quality = cluster_quality(fixture_units, labels)
+        print(
+            f"  {'KMeans k=' + str(k):<34}"
+            f"{quality['purity']:>8.3f}{quality['coverage']:>10.3f}"
+            f"{cluster_count(labels):>7}"
+        )
 
     print()
     print("=" * 68)

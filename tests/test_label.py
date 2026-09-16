@@ -492,6 +492,24 @@ class TestDegradation:
         shortened = SECRET[:12]
         assert find_verbatim_overlap(shortened, [SECRET], min_len=4) is not None
 
+    def test_degraded_cluster_reports_unknown_difficulty_not_a_default(self):
+        """★ 降级后 ``difficulty`` 必须是 ``None``（"不知道"），不能是默认档位。
+
+        给它一个默认值（如 3）会让该簇在「实现难度」因子上拿到一个**看似有依据的**
+        分数（0.5，"难度中等"），而模型其实什么都没答出来。评分侧把 ``None`` 也
+        处理成中性值 0.5 —— 数值巧合相同，语义却完全不同，所以这条测试守的是
+        **"不许把未知伪装成已知"**这个约定，而不是一个数字。
+        """
+        cluster = make_cluster(1, texts=[SECRET], size=1)
+
+        def boom(messages: Sequence[Message]) -> str:
+            raise LLMError("超时")
+
+        label_clusters([cluster], provider=FakeProvider(boom))
+
+        assert cluster.difficulty is None, "降级后难度必须是'不知道'，不能是默认档位"
+        assert cluster.feasibility == ""
+
     def test_degraded_cluster_keeps_original_text_in_evidence(self):
         """降级只影响结论字段，不得丢证据 —— 证据链是产品的第一卖点。"""
         cluster = make_cluster(1, texts=[SECRET], size=1)

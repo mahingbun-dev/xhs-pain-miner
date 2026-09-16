@@ -16,6 +16,7 @@ M1 中途把痛点归集从 HDBSCAN 聚类换成了「LLM 归纳 + embedding 分
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 
 import pytest
 
@@ -432,6 +433,113 @@ class TestAssignUnits:
         _, result, _ = assign_units(units, vectors, provider=provider, threshold=1.1)
 
         assert result.unmatched == len(units)
+
+
+class TestEncodeFallbackContract:
+    """★ ``encode`` 兜底的契约：向量与痛点名必须**一一对应**。
+
+    修复前的实现是 ``zip(missing, encode(missing))`` —— 返回的条数少于缺失痛点数
+    时 ``zip`` 会**静默截断**，于是一部分痛点根本没有质心，而警告仍然声称它们
+    "已改用痛点名本身的向量作为质心"。这是谎报：兜底没生效，用户却以为生效了。
+
+    本类的契约（实现选择抛错，理由见 ``assign_units`` 里的注释）：条数不符时
+    直接失败，既不猜也不部分采用。
+    """
+
+    names = ["搓泥", "假白", "闷痘", "难卸", "价格"]
+
+    def setup_case(self, labeled: list[str] | None = None):
+        """只给第一个痛点打标 → 其余四个没有样本质心，需要兜底。"""
+        units = make_units(15)
+        vectors = [axis(5, index % 5) for index in range(15)]
+        labels = labeled if labeled is not None else ["搓泥"] * 3 + [""] * 12
+        return units, vectors, FakeLLM(reply_with(self.names, labels))
+
+    def test_short_encode_raises_instead_of_silently_truncating(self):
+        """★ 少返一条必须报错 —— 修复前这里会静默截断并谎报"全部补上了"。"""
+        units, vectors, provider = self.setup_case()
+
+        def short_encode(texts: Sequence[str]) -> list[list[float]]:
+            return [axis(5, index) for index, _ in enumerate(texts[:-1])]
+
+        with pytest.raises(ValueError) as excinfo:
+            assign_units(units, vectors, provider=provider, encode=short_encode)
+
+        message = str(excinfo.value)
+        assert "encode" in message
+        assert "3" in message and "4" in message, "报错必须说清实际返回几个、需要几个"
+
+    def test_extra_encode_raises_too(self):
+        """多返同样是对应关系已破 —— zip 会静默丢掉多出来的向量。"""
+        units, vectors, provider = self.setup_case()
+
+        def long_encode(texts: Sequence[str]) -> list[list[float]]:
+            return [axis(5, index % 5) for index in range(len(texts) + 1)]
+
+        with pytest.raises(ValueError, match="encode"):
+            assign_units(units, vectors, provider=provider, encode=long_encode)
+
+    def test_empty_encode_result_raises(self):
+        """返回空列表 —— 一个都没补上，更不能报告"已改用痛点名向量"。"""
+        units, vectors, provider = self.setup_case()
+
+        with pytest.raises(ValueError, match="encode"):
+            assign_units(units, vectors, provider=provider, encode=lambda texts: [])
+
+    def test_exact_length_backfills_every_missing_pain_and_says_so(self):
+        """条数正确时兜底照常生效，且**每个**缺失的痛点都真的建了质心。
+
+        断言刻意写成"每个痛点都分到了文本"，而不是"搓泥没有独占全部文本"——
+        后者太弱：只补第一个痛点也会让"搓泥"不再独占（其余的文本会被挤给那个补上的
+        质心），于是错误实现照样通过。而"只补一部分"正是这条兜底要防的事：
+        没补上的痛点会被静默挤掉，它的 ``size`` 归零，产物看起来却完全正常。
+        """
+        units, vectors, provider = self.setup_case()
+        calls: list[list[str]] = []
+
+        def encode(texts: Sequence[str]) -> list[list[float]]:
+            calls.append(list(texts))
+            # 每个缺失的痛点给一个互不相交、且不与"搓泥"样本质心（axis 0）重合的方向，
+            # 这样"有没有真的补上"可以从分类结果直接读出来。
+            return [axis(5, 1 + index) for index, _ in enumerate(texts)]
+
+        taxonomy, result, warnings = assign_units(units, vectors, provider=provider, encode=encode)
+
+        assert calls == [["假白", "闷痘", "难卸", "价格"]], "只该给缺失的痛点补质心"
+        backfill = next(w for w in warnings if "痛点名" in w)
+        assert f"{len(self.names) - 1} 个痛点" in backfill
+
+        assert len(taxonomy) == len(self.names)
+        # ★ 每个痛点都必须出现在分类结果里 —— 少一个就说明它的质心没补上，
+        #   而不是"文本恰好都没命中"
+        missing_pains = set(self.names) - set(result.labels)
+        assert not missing_pains, (
+            f"这些痛点没分到任何文本，说明它们的质心没有被补上：{sorted(missing_pains)}"
+        )
+
+    def test_encode_is_not_called_when_nothing_is_missing(self):
+        """每个痛点都有打标样本时不该白跑一次编码。"""
+        units, vectors, provider = self.setup_case(labeled=[self.names[i // 3] for i in range(15)])
+        calls: list[list[str]] = []
+
+        def encode(texts: Sequence[str]) -> list[list[float]]:
+            calls.append(list(texts))
+            return []
+
+        _taxonomy, _result, warnings = assign_units(
+            units, vectors, provider=provider, encode=encode
+        )
+
+        assert calls == []
+        assert not any("痛点名" in warning for warning in warnings)
+
+    def test_no_encoder_still_falls_back_to_the_soft_warning(self):
+        """不传 encode 的老路径不受影响 —— 仍是"质心不足"的软警告，不抛错。"""
+        units, vectors, provider = self.setup_case()
+
+        _taxonomy, _result, warnings = assign_units(units, vectors, provider=provider)
+
+        assert any("质心" in warning for warning in warnings)
 
 
 # --------------------------------------------------------------------------- #

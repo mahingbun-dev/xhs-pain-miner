@@ -263,10 +263,18 @@ def _render_result(result: MiningResult) -> None:
 
     完整报告（含证据链与因子溯源）由 ``render`` 模块产出的 HTML 文件承载，
     终端只给出够用的概览。
+
+    噪声簇（长尾低频）**不进表格** —— 与 HTML / Markdown 的
+    ``include_noise=False`` 默认值保持一致。它的 ``label`` 是空的，会被
+    ``_direction_title`` 渲染成"待命名方向"，而它又常常因为 ``size`` 大而排在
+    第一位 —— 用户打开终端看到的第一行就变成了「最大的机会：待命名方向」。
     """
+    cards = [card for card in result.top_cards if not card.pain.is_noise]
+    noise_total = sum(card.pain.size for card in result.top_cards if card.pain.is_noise)
+
     console.print(
         f"\n[bold]📊 {_safe(result.keyword)}[/bold] —— "
-        f"{len(result.cards)} 张机会卡片 / {len(result.clusters)} 个痛点簇"
+        f"{len(cards)} 张机会卡片 / {len(result.clusters)} 个痛点簇"
     )
     console.print(f"   样本: {result.total_notes} 篇笔记 / {result.total_comments} 条评论")
     console.print(f"   成本: {_safe(result.cost.summary())}")
@@ -274,7 +282,13 @@ def _render_result(result: MiningResult) -> None:
     for message in result.notes:
         console.print(f"   [yellow]⚠️  {_safe(message)}[/yellow]")
 
-    if not result.cards:
+    if noise_total:
+        console.print(
+            f"   [dim]另有 {noise_total} 条发言不属于任何已识别的痛点（长尾低频），"
+            f"未计入卡片。[/dim]"
+        )
+
+    if not cards:
         console.print("\n[yellow]没有产出任何机会卡片。[/yellow]")
         return
 
@@ -285,7 +299,7 @@ def _render_result(result: MiningResult) -> None:
     table.add_column("提及", justify="right")
     table.add_column("活跃竞品", justify="right")
 
-    for card in result.top_cards[:15]:
+    for card in cards[:15]:
         active = sum(1 for c in card.competitors if not c.is_stale)
         table.add_row(
             _safe(f"{card.score:.0f}"),

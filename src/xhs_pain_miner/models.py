@@ -286,6 +286,16 @@ class Evidence:
 
     证据链是与"免费的 LLM 摘要"拉开差距的关键：每条结论都能点回原文。
     ``text`` 属于原始内容，**不会**随众包上传离开本机。
+
+    .. note::
+       本类**故意没有** ``to_public_dict()``。合规边界是"原文永不出网"，而这条线
+       是**结构性**的：:meth:`OpportunityCard.to_public_dict` 根本不把 ``Evidence``
+       放进载荷（只带 ``PainCluster.evidence_count`` 这样的计数）。
+
+       留一个"把单条证据转成可公开字典"的方法会传递错误信号 —— 它暗示原文可以
+       逐条筛掉几个敏感字段后送出去。正确做法是**整块不送**。要做众包统计请在
+       ``PainCluster`` / ``OpportunityCard`` 层导出聚合量，不要在 ``Evidence`` 层
+       开一个出口。
     """
 
     text: str
@@ -300,13 +310,6 @@ class Evidence:
     ``None`` 表示该条没有时间信息，计算趋势时按中性处理，**不要**当作"很早"。
     """
 
-    def to_public_dict(self) -> dict[str, Any]:
-        """导出为可公开的摘要（不含原文）。
-
-        众包上传时使用。只保留"这个簇有多少条证据、来自哪类来源"这类统计信息。
-        """
-        return {"source": self.source, "likes": self.likes}
-
 
 @dataclass(slots=True)
 class PainCluster:
@@ -316,7 +319,10 @@ class PainCluster:
         size: 簇内证据条数，即「提及次数」。该值由聚类结果直接计算，
             不是 LLM 生成，因此可复现、可回溯、可人工核对。
         sentiment: -1.0（完全负面）到 1.0（完全正面）。
-        is_noise: 是否为 HDBSCAN 的噪声簇（未归入任何簇的长尾低频痛点）。
+        is_noise: 是否为「长尾低频痛点」桶 —— 没能归入任何已识别痛点的发言。
+            聚类路径下它是 HDBSCAN 的噪声点，分类路径下它是未命中任何痛点名的
+            文本。两种来源的语义一致：**它们是真实发言，只是不属于已知痛点**，
+            因此不丢弃，单独成簇呈现。
     """
 
     id: str
