@@ -651,3 +651,161 @@ class TestWarningStaysLocal:
         payload = json.dumps(card.to_public_dict(), ensure_ascii=False)
         assert outcome.warning not in payload
         assert "不想输出 JSON" not in payload
+
+
+# --------------------------------------------------------------------------- #
+# 节流：连续的平台请求之间必须真的等一等
+# --------------------------------------------------------------------------- #
+
+
+class TestPacing:
+    """★ 连续的平台请求之间必须过一遍节流器。
+
+    GitHub 匿名额度约 10 次/分钟（``SEARCH_INTERVAL_ANONYMOUS`` 是 6 秒），不限速
+    就是一串脉冲、直接撞 403 —— 而被限流的簇会退化成"这次没查成"（空白度中性，
+    而且按 P1 的规则还会把整个结论拉成 ``unsearchable``），M2 费力修好的
+    ``no_competitor``（唯一的正面信号）就丢了。
+
+    :class:`~xhs_pain_miner.research.github.SearchPacer` 自己有 4 条单元测试，但
+    **"流水线真的用了它"此前无人守**：实测把 ``pacer.wait()`` 删掉，全套 1107 个
+    测试仍然全绿。
+    """
+
+    def test_consecutive_queries_are_paced(self, channels, monkeypatch):
+        slept: list[float] = []
+        monkeypatch.setattr(github, "_sleep", slept.append)
+        llm = RouterLLM(
+            [
+                {"text": "a", "channel": "github"},
+                {"text": "b", "channel": "github"},
+                {"text": "c", "channel": "github"},
+            ],
+            relevance='{"relevant": [], "rejected": [0]}',
+        )
+        channels.on_github(
+            lambda request: github_response([repo("x/y")], total_count=1), monkeypatch
+        )
+
+        run_research(llm)
+
+        assert len(slept) >= 2, (
+            f"3 次连续请求之间至少要等 2 次，实际只等了 {len(slept)} 次 —— 节流器没有接进请求路径"
+        )
+        assert all(duration > 0 for duration in slept)
+
+    def test_pacer_is_created_once_per_run_not_per_cluster(self, channels, monkeypatch):
+        """节流器必须**整个运行一个**，而不是每个簇一个。
+
+        每簇重建会让每个簇的第一个词都"立刻发" —— 12 个簇排下来就是一串脉冲，
+        正是 :class:`~xhs_pain_miner.research.github.SearchPacer` 的文档警告过的
+        那种撞 403 的节奏。
+
+        单簇测试看不出来（簇内行为完全一样），所以这条必须跑**多个簇**。
+        """
+        created: list[object] = []
+        real = github.SearchPacer
+
+        def spy(**kwargs: object) -> object:
+            instance = real(**kwargs)  # type: ignore[arg-type]
+            created.append(instance)
+            return instance
+
+        monkeypatch.setattr(github, "SearchPacer", spy)
+        llm = RouterLLM(
+            [{"text": "cosmetic lookup", "channel": "github"}],
+            relevance='{"relevant": [], "rejected": [0]}',
+        )
+        channels.on_github(
+            lambda request: github_response([repo("x/y")], total_count=1), monkeypatch
+        )
+
+        miner(llm)._research_clusters([cluster("防晒搓泥"), cluster("假白泛白")], "防晒霜", [])
+
+        assert len(created) == 1, (
+            f"一次运行只应建一个节流器，实际建了 {len(created)} 个 —— "
+            "每簇一个会让每个簇的首个请求都立刻发出"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# 配置接线：新增的配置项必须真的到得了调用点
+# --------------------------------------------------------------------------- #
+
+
+class TestSettingsAreWired:
+    """★ 写进 ``config.py`` 不等于接线 —— 实测把这两项写死成默认值，没有测试变红。
+
+    这类缺口的特点是**功能看起来能用**（默认值恰好是对的），而用户改了配置却
+    发现没生效，且没有任何提示。
+    """
+
+    QUERIES = [{"text": "美妆 成分查询", "channel": "appstore"}]
+
+    def test_appstore_country_reaches_the_request(self, channels, monkeypatch):
+        seen: list[object] = []
+        real = appstore_module.search_apps
+
+        def spy(query: str, **kwargs: object) -> object:
+            seen.append(kwargs.get("country"))
+            return real(query, **kwargs)  # type: ignore[arg-type]
+
+        # ``pain_miner`` 里是 ``from ... import appstore`` 再走属性调用，
+        # 所以替换模块属性即可生效
+        monkeypatch.setattr(appstore_module, "search_apps", spy)
+        channels.on_appstore(lambda request: appstore_response([]), monkeypatch)
+
+        run_research(RouterLLM(self.QUERIES), appstore_country="jp")
+
+        assert seen == ["jp"], "appstore_country 没有传到检索请求上"
+
+    def test_max_queries_reaches_the_generator(self, channels, monkeypatch):
+        seen: list[object] = []
+        real = query_module.build_solution_queries
+
+        def spy(cluster: PainCluster, **kwargs: object) -> object:
+            seen.append(kwargs.get("max_queries"))
+            return real(cluster, **kwargs)  # type: ignore[arg-type]
+
+        # 这一处是 ``from ... import build_solution_queries``（模块级绑定），
+        # 必须打到 pain_miner 上 —— 打在被导入的那个模块上不会生效
+        monkeypatch.setattr("xhs_pain_miner.pain_miner.build_solution_queries", spy)
+        channels.on_appstore(lambda request: appstore_response([]), monkeypatch)
+
+        run_research(RouterLLM(self.QUERIES), research_max_queries_per_cluster=2)
+
+        assert seen == [2], "research_max_queries_per_cluster 没有传到检索词生成"
+
+    def test_zero_max_queries_does_not_blame_the_channels(self, channels, monkeypatch):
+        """★ 配置设成 0 时，警告必须说清成因。
+
+        说成"没有可路由的检索词（全部指向尚未接入的渠道）"是一句**失实**的话 ——
+        压根没有生成词，谈不上指向哪儿，而用户会照着这句话去查一个无关的渠道配置。
+        """
+        channels.on_github(lambda request: github_response([]), monkeypatch)
+
+        outcome, messages = run_research(
+            RouterLLM([{"text": "x", "channel": "github"}]),
+            research_max_queries_per_cluster=0,
+        )
+
+        text = " ".join(messages)
+        assert outcome.status == "unsearchable"
+        assert "没有生成任何检索词" in text
+        assert "尚未接入的渠道" not in text
+
+    def test_zero_max_clusters_does_not_look_like_a_partial_run(self, channels, monkeypatch):
+        """``RESEARCH_MAX_CLUSTERS=0`` 是"一个都没查"，不是"只覆盖了一部分"。
+
+        "只覆盖了提及量最高的 0 个痛点簇"字面没错，但读起来像查过一部分 ——
+        而实际是全部按中性值处理，用户据此判断"没查到竞品"会完全跑偏。
+        """
+        channels.on_github(lambda request: github_response([]), monkeypatch)
+        messages: list[str] = []
+
+        miner(
+            RouterLLM([{"text": "x", "channel": "github"}]), research_max_clusters=0
+        )._research_clusters([cluster("防晒搓泥"), cluster("假白泛白")], "防晒霜", messages)
+
+        text = " ".join(messages)
+        assert "竞品调研被关闭" in text
+        assert "只覆盖了提及量最高的 0 个" not in text

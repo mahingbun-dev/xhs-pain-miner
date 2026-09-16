@@ -571,11 +571,20 @@ class PainMiner:
         candidates_for_research = named[: self.settings.research_max_clusters]
         over_limit = named[self.settings.research_max_clusters :]
         if over_limit:
-            messages.append(
-                f"竞品调研只覆盖了提及量最高的 {len(candidates_for_research)} 个痛点簇"
-                f"（共 {len(named)} 个），其余簇的空白度按中性值计算。"
-                f"配置 GITHUB_TOKEN 可提高调用配额，或调大 RESEARCH_MAX_CLUSTERS。"
-            )
+            # ``RESEARCH_MAX_CLUSTERS=0`` 时上面那句会变成"只覆盖了提及量最高的 0 个
+            # 痛点簇"—— 字面没错，但读起来像"覆盖了一部分"，而实际是一个都没查。
+            if candidates_for_research:
+                messages.append(
+                    f"竞品调研只覆盖了提及量最高的 {len(candidates_for_research)} 个痛点簇"
+                    f"（共 {len(named)} 个），其余簇的空白度按中性值计算。"
+                    f"配置 GITHUB_TOKEN 可提高调用配额，或调大 RESEARCH_MAX_CLUSTERS。"
+                )
+            else:
+                messages.append(
+                    f"竞品调研被关闭（RESEARCH_MAX_CLUSTERS={self.settings.research_max_clusters}），"
+                    f"全部 {len(named)} 个痛点簇都没有查；其「竞品空白度」按中性值计 —— "
+                    "未调研不等于没有竞品。"
+                )
             # 超出上限的簇同样**没查过**，必须一并标成 unsearchable —— 与关闭调研
             # 同理，缺省值必须落在保守的一侧。
             for cluster in over_limit:
@@ -628,9 +637,21 @@ class PainMiner:
                 "跳过不等于那些渠道里没有竞品，它们也不参与本次结论。"
             )
         if not routed:
+            # 两种成因必须分开说。生成失败那一支在更早的分支已经返回了，所以这里
+            # 只剩：词都指向未接入的渠道 / 压根没生成词（如
+            # RESEARCH_MAX_QUERIES_PER_CLUSTER=0）。
+            # 把后者也说成"全部指向尚未接入的渠道"是一句**失实**的话 —— 根本没有词，
+            # 谈不上指向哪儿，而用户会照着这句话去查渠道配置。
             unsearchable = (
                 f"簇「{identity}」没有可路由的检索词（全部指向尚未接入的渠道），"
                 "本次没有查任何渠道；其「竞品空白度」按中性值计 —— 没查过不等于没有竞品。"
+                if skipped
+                else (
+                    f"簇「{identity}」本次没有生成任何检索词（若这不是预期的，"
+                    "请检查 RESEARCH_MAX_QUERIES_PER_CLUSTER 是否被设成了 0）；"
+                    "本次没有查任何渠道，其「竞品空白度」按中性值计 —— "
+                    "没查过不等于没有竞品。"
+                )
             )
             messages.append(unsearchable)
             return ResearchOutcome(status="unsearchable", warning=unsearchable)

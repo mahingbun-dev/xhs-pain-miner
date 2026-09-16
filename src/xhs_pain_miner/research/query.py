@@ -331,10 +331,10 @@ def build_solution_queries(
 def _clean_term(value: Any) -> str:
     """规范化检索词：压平空白、截断过长内容、丢弃纯标点。
 
-    与 :func:`~xhs_pain_miner.research.github._clean_term` 是同一套规则，但**故意
-    不 import 它**：同层模块互相 import 会把两个渠道的演进绑在一起（GitHub 的 40 字
-    上限是为它的仓库搜索定的，App Store 未必同一个数），而这里要的只是"别把脏词
-    发给平台"这一个诉求。
+    这套规则与 GitHub 渠道里的同名工具一致，但**故意不去 import 它**：同层模块
+    互相 import 会把两个渠道的演进绑在一起（GitHub 那个 40 字上限是为它的仓库
+    搜索定的，App Store 未必同一个数），而这里要的只是"别把脏词发给平台"这一个
+    诉求。
     """
     if not isinstance(value, str):
         return ""
