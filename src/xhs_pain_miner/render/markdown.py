@@ -41,6 +41,9 @@ _STAGE_LABELS = {"new": "新兴", "growing": "上升", "stable": "平稳", "decl
 _ALLOWED_URL_PREFIXES = ("http://", "https://")
 """链接协议白名单 —— ``javascript:`` 是合法 URL，转义拦不住它。"""
 
+_COMPETITOR_DESC_CHARS = 160
+"""竞品平台描述的截断长度，与 HTML 产物和相关性判定保持一致（见 html 的同名常量）。"""
+
 
 def _esc(value: object) -> str:
     """转义任意值，供插入 Markdown 正文。
@@ -158,8 +161,16 @@ def _competitor_lines(card: OpportunityCard) -> list[str]:
             parts.append("**已停更**" if finding.is_stale else "仍在维护")
         else:
             parts.append("最后活跃时间未知")
-        gap = f"：{_esc(finding.gap_notes)}" if finding.gap_notes else ""
-        lines.append(f"- {_link(finding.url, finding.name)} — {' · '.join(parts)}{gap}")
+        lines.append(f"- {_link(finding.url, finding.name)} — {' · '.join(parts)}")
+        # 平台描述是"这条为什么算竞品"的唯一依据，人工抽检要用它 —— 而 Markdown 是
+        # **要发出去**的那一份，读它的人更没法自己去查。缩进一层，不抢竞品行的重心。
+        if finding.description:
+            shown = finding.description
+            if len(shown) > _COMPETITOR_DESC_CHARS:
+                shown = shown[: _COMPETITOR_DESC_CHARS - 1] + "…"
+            lines.append(f"  > {_esc(shown)}")
+        if finding.gap_notes:
+            lines.append(f"  > {_esc(finding.gap_notes)}")
 
     # 「这些竞品没验过」必须出现在**卡片自己**的小节里，不能只留在运行提示里：
     # 判定失败时候选被全部保留（保守取舍），卡片会与一次正常判定**长得一模一样**，

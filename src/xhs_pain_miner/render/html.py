@@ -63,6 +63,14 @@ _ALLOWED_URL_PREFIXES = ("http://", "https://")
 能拦住。非 http(s) 的竞品链接降级成纯文本，用户仍然看得到名字。
 """
 
+_COMPETITOR_DESC_CHARS = 160
+"""竞品平台描述在报告里截断到多少字。
+
+取 160 与 :data:`~xhs_pain_miner.research.relevance._MAX_DESCRIPTION_CHARS` 一致 ——
+判定用多少字，人就该看到多少字。不截断的话 App Store 的副标题能到上千字，
+几张卡片的报告会被描述淹没；而它存在的意义只是让"这条为什么算竞品"一眼可判。
+"""
+
 _SOURCE_LABELS = {"note": "笔记", "comment": "评论"}
 
 _STAGE_LABELS = {
@@ -531,11 +539,19 @@ def _render_competitors(card: OpportunityCard) -> str:
             meta.append(f'<span class="{"stale" if finding.is_stale else ""}">{_esc(label)}</span>')
         else:
             meta.append("<span>最后活跃：未知</span>")
+        # 平台描述是"这条为什么算竞品"的**唯一依据**，也是人工抽检（M2 验收门）的
+        # 输入。此前它只进判定提示词与出网载荷，本地产物里反而看不到 —— 用户只能
+        # 逐个点开链接自行判断。gap_notes（LLM 归纳的"它没覆盖什么"）两个渠道目前
+        # 都恒为空，留着是为了让将来接上的渠道不必改渲染。
+        shown = finding.description
+        if len(shown) > _COMPETITOR_DESC_CHARS:
+            shown = shown[: _COMPETITOR_DESC_CHARS - 1] + "…"
+        desc = f'<p class="comp-gap">{_esc(shown)}</p>' if shown else ""
         gap = f'<p class="comp-gap">{_esc(finding.gap_notes)}</p>' if finding.gap_notes else ""
         rows.append(
             f'<li><div class="comp-name">{name}'
             f'<span class="comp-src">{_esc(finding.source)}</span></div>'
-            f'<p class="comp-meta">{"".join(meta)}</p>{gap}</li>'
+            f'<p class="comp-meta">{"".join(meta)}</p>{desc}{gap}</li>'
         )
 
     # 没有调研记录时只留结论那句话 —— 空态框和结论说的是同一件事，重复只会稀释重点

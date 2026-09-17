@@ -751,3 +751,52 @@ class TestUnjudgedCompetitorsAreLabelled:
         card = make_card(competitors=self.UNRELATED, research_status="ok")
         assert "未经相关性判定" not in render_markdown(make_result(cards=[card]))
         assert "未经相关性判定" not in render_html(make_result(cards=[card]))
+
+
+class TestCompetitorDescriptions:
+    """竞品描述必须出现在**本地产物**里。
+
+    它是"这条为什么算竞品"的唯一依据，也是 M2 验收门「人工抽检准确率」的输入 ——
+    此前它只进判定提示词与出网载荷，本地产物里反而看不到，用户只能逐个点开链接
+    自行判断（而抽检要看的正是这个）。
+    """
+
+    DESCRIPTION = "拍照查询化妆品成分，覆盖十万种市售产品"
+
+    def _card(self) -> OpportunityCard:
+        return make_card(
+            competitors=[
+                CompetitorFinding(
+                    source="appstore",
+                    name="美丽修行",
+                    url="https://apps.apple.com/cn/app/x",
+                    description=self.DESCRIPTION,
+                )
+            ],
+            research_status="ok",
+        )
+
+    def test_html_shows_the_description(self):
+        assert self.DESCRIPTION in render_html(make_result(cards=[self._card()]))
+
+    def test_markdown_shows_the_description(self):
+        assert self.DESCRIPTION in render_markdown(make_result(cards=[self._card()]))
+
+    def test_long_description_is_truncated(self):
+        """超长描述必须截断 —— App Store 的副标题能到上千字，几张卡片就淹没报告。
+
+        截断长度与判定用的保持一致（160 字）：**判定看多少字，人就该看到多少字**，
+        否则用户复核时会发现"报告里的描述不足以判出这个结论"。
+        """
+        long_text = "描" * 900
+        card = make_card(
+            competitors=[
+                CompetitorFinding(
+                    source="appstore", name="x", url="https://e.test/x", description=long_text
+                )
+            ],
+            research_status="ok",
+        )
+        document = render_html(make_result(cards=[card]))
+        assert long_text not in document
+        assert "描" * 159 + "…" in document
