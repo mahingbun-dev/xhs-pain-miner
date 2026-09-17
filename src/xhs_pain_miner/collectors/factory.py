@@ -6,18 +6,11 @@ from typing import TYPE_CHECKING
 
 from xhs_pain_miner.collectors.base import CollectorBackend, CollectorError
 from xhs_pain_miner.collectors.fixture import FixtureBackend
+from xhs_pain_miner.collectors.mcp import MCPBackend
 from xhs_pain_miner.collectors.plugin import load_plugin_backend
 
 if TYPE_CHECKING:  # pragma: no cover
     from xhs_pain_miner.config import Settings
-
-MCP_PENDING_MESSAGE = (
-    "MCP 采集后端将在 M3 里程碑提供。\n"
-    "在此之前可以：\n"
-    "  1. 用内置样例数据体验完整流程：--backend fixture\n"
-    "  2. 或在本地自备采集器上写一个薄适配器：--backend plugin\n"
-    "     详见 docs/collector-plugin.md"
-)
 
 
 def build_collector(settings: Settings) -> CollectorBackend:
@@ -41,6 +34,13 @@ def build_collector(settings: Settings) -> CollectorBackend:
         return load_plugin_backend(settings.collector_plugin or "")
 
     if backend == "mcp":
-        raise CollectorError(MCP_PENDING_MESSAGE)
+        # 构造本身不联网：地址对不对要等 collect() / available() 才知道。
+        # 在这里做连通性检查会让 `doctor` 把同一件事查两遍，也会让"只想看看配置"
+        # 的场景意外触发一次服务请求。
+        return MCPBackend(
+            base_url=settings.xhs_mcp_url,
+            token=settings.xhs_mcp_token,
+            timeout=settings.xhs_mcp_timeout,
+        )
 
     raise CollectorError(f"未知的采集后端: {backend!r}（可选: fixture / plugin / mcp）")

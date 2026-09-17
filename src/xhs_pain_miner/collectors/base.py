@@ -6,10 +6,16 @@
 
 * :class:`~xhs_pain_miner.collectors.fixture.FixtureBackend` —— 内置脱敏样例，随仓库分发。
 * :class:`~xhs_pain_miner.collectors.plugin.PluginBackend` —— 加载**用户本机自备**的采集器。
-* MCP 后端（M3 里程碑）—— 对接宽松许可的开源采集服务。
+* :class:`~xhs_pain_miner.collectors.mcp.MCPBackend` —— 适配 ``xiaohongshu-mcp``
+  （Apache-2.0）：适配器在仓库内，**采集服务仍由用户在本机运行**。
 
 这样做的原因：第三方采集器的许可证往往不允许商业使用或再分发。把实现留在用户本机、
 仓库只保留协议与适配器，可以同时满足「可商用」与「权属干净」两个要求。
+
+**判据是许可证，不是"好不好用"。** ``mcp`` 后端之所以能进仓库，唯一原因是上游采用
+Apache-2.0；同样好用的 MediaCrawler 因为「非商业学习许可」就只能走 ``plugin``。
+即便是 ``mcp``，仓库里也没有一行采集代码 —— 见 :mod:`xhs_pain_miner.collectors.mcp`
+与 ``docs/collector-mcp.md``。
 
 类比：Playwright 不内置浏览器，而是让用户自行提供。
 """

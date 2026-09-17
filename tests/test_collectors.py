@@ -16,6 +16,7 @@ import pytest
 from xhs_pain_miner.collectors.base import CollectorError
 from xhs_pain_miner.collectors.factory import build_collector
 from xhs_pain_miner.collectors.fixture import FixtureBackend, load_fixture_data, parse_corpus
+from xhs_pain_miner.collectors.mcp import MCPBackend
 from xhs_pain_miner.collectors.plugin import _ValidatedBackend, load_plugin_backend
 from xhs_pain_miner.config import Settings
 from xhs_pain_miner.models import RawCorpus, RawNote
@@ -164,10 +165,24 @@ class TestBuildCollector:
         collector = build_collector(_settings(collector_backend="fixture"))
         assert isinstance(collector, FixtureBackend)
 
-    def test_mcp_reports_pending_milestone(self):
-        """MCP 后端尚未实现，报错信息必须指明里程碑与替代方案。"""
-        with pytest.raises(CollectorError, match="M3"):
-            build_collector(_settings(collector_backend="mcp"))
+    def test_builds_mcp_with_configured_endpoint(self):
+        """MCP 后端按配置构造，且**构造本身不联网**。
+
+        连通性留给 collect() / available()：在工厂里查一次会让 doctor 把同一件事
+        查两遍，也会让"只想看看配置对不对"的场景意外发起一次服务请求（那个请求
+        在服务端还会开一个浏览器页面）。
+        """
+        collector = build_collector(
+            _settings(
+                collector_backend="mcp",
+                xhs_mcp_url="http://127.0.0.1:19999",
+                xhs_mcp_token="secret",
+                xhs_mcp_timeout=7.0,
+            )
+        )
+        assert isinstance(collector, MCPBackend)
+        assert collector.name == "xiaohongshu-mcp"
+        assert collector.base_url == "http://127.0.0.1:19999"
 
     def test_plugin_without_reference_gives_actionable_error(self):
         with pytest.raises(CollectorError, match="XHS_COLLECTOR_PLUGIN"):

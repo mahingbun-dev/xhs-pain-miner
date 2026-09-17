@@ -316,6 +316,10 @@ class PainMiner:
         notify("采集", 0.0)
         if corpus is None:
             corpus = self.collect(keyword, limit=notes_count)
+        # 采集层的告警排在最前：它们描述的是**这份语料本身的构成**，而后面所有的
+        # 次数与占比都建立在它之上。放在末尾会让人先读到"某因子取了中性值"，
+        # 再发现"其实是因为语料少了一半"。
+        messages.extend(corpus.warnings)
         if not corpus.notes:
             # 采集后端的约定是「失败抛异常」，所以走到这里意味着确实搜不到结果。
             # 这不是错误，但必须说清楚，否则用户会以为分析管线出了问题。

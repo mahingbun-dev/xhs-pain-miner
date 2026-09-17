@@ -21,6 +21,7 @@ from click.testing import CliRunner
 
 from xhs_pain_miner import PainMiner
 from xhs_pain_miner.cli import main
+from xhs_pain_miner.collectors import mcp as mcp_module
 from xhs_pain_miner.config import Settings
 from xhs_pain_miner.llm.base import LLMError, LLMResponse
 from xhs_pain_miner.models import RunCost
@@ -454,10 +455,23 @@ class TestCollectCommand:
         assert target.is_file()
         assert "防晒霜" in target.read_text(encoding="utf-8")
 
-    def test_mcp_backend_fails_with_guidance(self, runner: CliRunner):
+    def test_mcp_backend_reports_unreachable_service(self, runner: CliRunner, monkeypatch):
+        """MCP 后端连不上时，CLI 必须给出可操作的提示，而不是裸 traceback。
+
+        **注入假传输层，不真的去连**：这台机器上有没有跑着 xiaohongshu-mcp 是随机
+        的，测试一旦依赖它，就会在开发机上绿、在 CI 上红（或者反过来）。
+        """
+
+        def refuse(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused", request=request)
+
+        monkeypatch.setattr(mcp_module, "_transport", httpx.MockTransport(refuse))
         result = runner.invoke(main, ["collect", "-k", "防晒霜", "--backend", "mcp"])
+
         assert result.exit_code != 0
-        assert "M3" in result.output
+        assert "无法连接" in result.output
+        # 只说"连不上"不够 —— 用户需要知道下一步做什么
+        assert "扫码登录" in result.output
 
     def test_missing_keyword_is_usage_error(self, runner: CliRunner):
         result = runner.invoke(main, ["collect"])

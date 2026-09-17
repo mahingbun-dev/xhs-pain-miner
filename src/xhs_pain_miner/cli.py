@@ -450,6 +450,11 @@ def collect(
 
     console.print(f"✅ 采集完成：[bold]「{_safe(keyword)}」[/bold] {_safe(corpus.summary())}")
 
+    # 语料不完整必须在这里说 —— collect 命令就是用来"验证采集层"的，
+    # 用户看完统计数字就走，不会再去翻别的地方。
+    for message in corpus.warnings:
+        console.print(f"[yellow]⚠️  {_safe(message)}[/yellow]")
+
     if not corpus.notes:
         console.print(
             "[yellow]⚠️  没有采集到任何笔记。可能是关键词无结果，或采集后端未正常工作。[/yellow]"
@@ -508,7 +513,10 @@ def collect(
 
 @main.command()
 def doctor() -> None:
-    """🩺 诊断环境配置（只做本地检查，不发起网络请求，也不会创建任何目录）。
+    """🩺 诊断环境配置（不调用 LLM/VLM、不写任何文件、不创建任何目录）。
+
+    唯一会发请求的是采集后端那一项：它会问后端"当前可用吗"（`mcp` 后端因此会去
+    连你本机的 xiaohongshu-mcp，账号掉线时会直接告诉你）。
 
     \b
     示例:
