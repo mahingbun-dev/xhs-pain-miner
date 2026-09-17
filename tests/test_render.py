@@ -753,6 +753,54 @@ class TestUnjudgedCompetitorsAreLabelled:
         assert "未经相关性判定" not in render_html(make_result(cards=[card]))
 
 
+class TestPartialResearchReachesTheCard:
+    """「有检索词没查成 → 清单可能不全」必须出现在**卡片自己**的小节里。
+
+    这条此前两个渲染器**都到不了**：判据写的是 ``card.research_failed``，而有 findings
+    ⇒ 状态必是 ``ok`` ⇒ 它恒为 ``False``。信息只留在运行提示里，卡片与一次完整调研
+    长得一模一样 —— 而 ``render/html.py`` 那段注释本来就写着这两种情形"都必须说"：
+    **注释描述了意图，判据没实现它**。
+
+    画面之外的实证：``OpportunityCard.research_incomplete``（派生属性）就是把这个缺口
+    补成代码，两个渲染器共用它 —— 它们此前各写一份判据，漂移就是这么发生的。
+    """
+
+    COMPETITOR = [
+        CompetitorFinding(
+            source="github",
+            name="acme/tool",
+            url="https://e.test/tool",
+            stars=120,
+            last_active=date.today(),
+        )
+    ]
+    PARTIAL = (
+        QueryTrace(query="小红书 收藏 备份", channel="github", hits=3, kept=1),
+        QueryTrace(query="笔记 导出 工具", channel="github", error="HTTP 403 限流"),
+    )
+
+    def test_markdown_says_the_list_may_be_incomplete(self):
+        card = make_card(
+            competitors=self.COMPETITOR, research_status="ok", research_queries=self.PARTIAL
+        )
+        assert "结果可能不完整" in render_markdown(make_result(cards=[card]))
+
+    def test_html_says_the_list_may_be_incomplete(self):
+        card = make_card(
+            competitors=self.COMPETITOR, research_status="ok", research_queries=self.PARTIAL
+        )
+        assert "结果可能不完整" in render_html(make_result(cards=[card]))
+
+    def test_complete_research_says_nothing_extra(self):
+        """反向守卫：每条检索词都查成时不许加这句话。"""
+        complete = (QueryTrace(query="小红书 收藏 备份", channel="github", hits=3, kept=1),)
+        card = make_card(
+            competitors=self.COMPETITOR, research_status="ok", research_queries=complete
+        )
+        assert "结果可能不完整" not in render_markdown(make_result(cards=[card]))
+        assert "结果可能不完整" not in render_html(make_result(cards=[card]))
+
+
 class TestCompetitorDescriptions:
     """竞品描述必须出现在**本地产物**里。
 

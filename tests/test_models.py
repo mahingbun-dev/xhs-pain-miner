@@ -227,6 +227,50 @@ class TestOpportunityCard:
             card.research_status = status  # type: ignore[assignment]
             assert card.research_failed == ResearchOutcome(status=status).research_failed
 
+    def test_research_incomplete_covers_the_partial_failure_case(self):
+        """★ ``research_incomplete`` 必须覆盖"另一条检索词没查成"这条**可达**场景。
+
+        它与 ``research_failed`` **互相独立**：找到竞品 + 同渠道内另一条词被限流时，
+        ``research_failed`` 为 ``False``（空白度按找到的竞品算 —— 这是刻意的，已经拿到
+        真实竞品就不该断言"没查成"），但清单**确实不完整**。
+
+        渲染层原来只判 ``research_failed or research_judgement_failed``，两者都为
+        ``False`` —— 于是卡片上一个字都不提。而 ``render/html.py`` 那段注释本就写着
+        这两种情形"**都必须说**"：注释描述了意图，判据没实现它。
+
+        变异提示：把 ``research_incomplete`` 改回只读那两个布尔，这条必须变红。
+        """
+        card = self._card()
+        card.research_status = "ok"
+        assert card.research_incomplete is False
+
+        card.research_queries = (QueryTrace(query="a", channel="github", hits=3, kept=1),)
+        assert card.research_incomplete is False, "全都查成了就没什么可说的"
+
+        card.research_queries = (
+            QueryTrace(query="a", channel="github", hits=3, kept=1),
+            QueryTrace(query="b", channel="github", error="GitHub 搜索被限流（HTTP 403）"),
+        )
+        assert card.research_failed is False, "空白度不退回中性 —— 这是刻意的"
+        assert card.research_incomplete is True
+
+    def test_research_incomplete_is_implied_by_the_two_older_flags(self):
+        """两个旧布尔为真时它必须也为真 —— 新判据只许**增**，不许把已有情形漏掉。"""
+        for status in ("unsearchable", "failed"):
+            card = self._card()
+            card.research_status = status  # type: ignore[assignment]
+            assert card.research_incomplete is True, status
+
+        card = self._card()
+        card.research_status = "ok"
+        card.research_judgement_failed = True
+        assert card.research_incomplete is True
+
+    def test_research_incomplete_is_derived_not_a_field(self):
+        """派生而非字段，理由同 ``research_failed``：手写就会出现自相矛盾状态。"""
+        with pytest.raises(AttributeError):
+            self._card().research_incomplete = True  # type: ignore[misc]
+
     def test_to_dict_keeps_full_data(self):
         """本地持久化必须保留完整数据（与上传路径区分开）。"""
         local = self._card()

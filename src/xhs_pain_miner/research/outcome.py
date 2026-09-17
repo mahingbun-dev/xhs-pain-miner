@@ -65,6 +65,13 @@ STATUS_LABELS: Mapping[ResearchStatus, str] = {
 否则 HTML 与 Markdown 两份产物会慢慢漂移成两套说法。
 """
 
+_MAX_QUERIES_IN_WARNING = 3
+"""警告文案里最多列出几条检索词。
+
+检索词最多 6 条，全列出来会把警告本身淹掉（用户读的是那句话，不是词表）。
+超出部分不丢信息：**完整检索轨迹**照旧随结论交付，可逐条复核。
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class ResearchOutcome:
@@ -264,6 +271,21 @@ def warning_for(
     ``ok`` 通常无需说明，**有一个例外**：找到了竞品、但不是每条检索词都查成。
     那时竞品列表是**部分结果**，而"漏掉的那条检索词里可能正躺着更强势的竞品"。
     这个例外是补回来的 —— 见 ``ok`` 分支里的说明。
+
+    .. important::
+       **这里只说"渠道上发生了什么"，不主张分数。**
+
+       这些文案会被 :meth:`ResearchOutcome.merged` 原样拼进最终结论，而合并后的
+       空白度可能**不是**中性值（另一个渠道查到了竞品）—— 于是"其「竞品空白度」按
+       中性值计"这句话在渠道层说，合并后就会变成假的，产物自相矛盾。
+
+       「分数怎么算」只能由唯一知道最终结论的那一层说，也就是
+       :func:`~xhs_pain_miner.scoring.opportunity._unresolved_warning` —— 它读的是
+       **卡片**，卡片上的 ``research_status`` 已经是合并之后的值。所以本函数里不再
+       出现任何关于空白度取值的断言，改由那里统一说（且只在确实为中性时才说）。
+
+       这条与本模块自己的立论同源：**主张只能由知道答案的那一层发出**。
+       渠道层不知道合并结果，轨迹层不知道评分口径 —— 都不该替结论层下判断。
     """
     if status == "ok":
         # 找到了竞品，但不是每条检索词都查成 → 这份列表**可能不完整**。
@@ -279,7 +301,7 @@ def warning_for(
         missed = [trace for trace in queries if not trace.succeeded]
         if not missed:
             return None
-        attempted = "、".join(f"「{trace.query}」" for trace in missed[:3])
+        attempted = "、".join(f"「{trace.query}」" for trace in missed[:_MAX_QUERIES_IN_WARNING])
         return (
             f"簇「{subject}」查到了竞品，但**竞品列表可能不完整**：{attempted} 这次没有"
             "查成。漏掉的那次检索里可能还有更强势的竞品，建议换个说法再搜一次核实 ——"
@@ -289,23 +311,14 @@ def warning_for(
     if status == "failed":
         reason = next((t.error for t in queries if t.error), "未知原因")
         return (
-            f"簇「{subject}」的竞品调研**失败**（{reason}），其「竞品空白度」按中性值计 "
+            f"簇「{subject}」的竞品调研**失败**（{reason}）"
             "—— 这不代表该方向没有竞品，只是这次没查成。"
         )
 
     if status == "unsearchable":
         if not queries:
-            return (
-                f"簇「{subject}」没有可用的检索词，未做竞品调研；"
-                "其「竞品空白度」按中性值计 —— 没查过不等于没有竞品。"
-            )
-        attempted = "、".join(f"「{t.query}」" for t in queries[:3])
-        return (
-            f"簇「{subject}」的检索词（{attempted}）在该渠道**没有返回任何结果**，"
-            "无法据此判断有没有竞品，其「竞品空白度」按中性值计。"
-            "注意：检索不到 ≠ 不存在 —— 换一个更贴近「用户会去找什么工具」的说法再搜，"
-            "往往就能搜到。"
-        )
+            return f"簇「{subject}」没有可用的检索词，未做竞品调研—— 没查过不等于没有竞品。"
+        return _unsearchable_warning(queries, subject=subject)
 
     # no_competitor
     searched = "、".join(f"「{t.query}」" for t in queries if t.succeeded and t.hits > 0)
@@ -315,6 +328,44 @@ def warning_for(
         f"簇「{subject}」查证过（{searched}）：平台能搜到内容，"
         "但没有与这个痛点相关的实现。以上结论附带完整检索轨迹，可逐条复核。"
     )
+
+
+def _unsearchable_warning(queries: Sequence[QueryTrace], *, subject: str) -> str:
+    """拼出"检索不到，无法判断"的警告 —— 按**成因**分开说。
+
+    ``unsearchable`` 在这里有两条完全不同的成因，混成一句会失实：
+
+    * 查询**成功、但平台返回 0 条** —— 是"这个说法在该渠道检索不到"。
+      下一步是换个更贴近"用户会去找什么工具"的说法再搜。
+    * 查询**没查成**（限流 / 网络）—— 是"这次没跑完"。下一步是等额度或网络恢复。
+
+    两者对用户的下一步动作不同，所以必须分开说。这条区分是**补的**：该分支写于
+    ``unsearchable`` 只有前者一种成因的年代，后来 :func:`classify_status` 把"部分失败"
+    也路由到了 ``unsearchable``，文案没跟上 —— 实测（独立验证复现）一条被限流的检索词
+    会被说成"在该渠道没有返回任何结果"，而它实际上是**调用失败**。这与
+    :func:`~xhs_pain_miner.scoring.opportunity._unresolved_warning` 主张"两类要分开报数"
+    是同一条道理，只是这里同样漏了。
+    """
+    returned_nothing = [trace for trace in queries if trace.succeeded]
+    missed = [trace for trace in queries if not trace.succeeded]
+
+    clauses: list[str] = []
+    tips: list[str] = []
+    if returned_nothing:
+        names = "、".join(
+            f"「{trace.query}」" for trace in returned_nothing[:_MAX_QUERIES_IN_WARNING]
+        )
+        clauses.append(f"检索词（{names}）在该渠道**没有返回任何结果**")
+        tips.append(
+            "检索不到 ≠ 不存在 —— 换一个更贴近「用户会去找什么工具」的说法再搜，往往就能搜到"
+        )
+    if missed:
+        names = "、".join(f"「{trace.query}」" for trace in missed[:_MAX_QUERIES_IN_WARNING])
+        clauses.append(f"检索词（{names}）这次**没有查成**（原因见检索轨迹）")
+        tips.append("没查成的那几条是限流或网络导致的，恢复后重跑即可")
+
+    detail = "；".join(clauses)
+    return f"簇「{subject}」的{detail}，无法据此判断有没有竞品。" + "；".join(tips) + "。"
 
 
 __all__ = [

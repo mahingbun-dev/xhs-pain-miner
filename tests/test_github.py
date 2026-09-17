@@ -258,6 +258,14 @@ class TestSearchRepositories:
         # "消息自己说清了这不是没有竞品、且结果不完整"。
         assert "不是「没有竞品」" in message
         assert "结果不完整" in message
+        # ★ 反向守卫：轨迹**不许**给评分下处方。
+        #
+        # 独立验证发现这是反向缺口 —— 往这条文案末尾加回"该簇的竞品空白度必须按中性值
+        # 处理。"，1148 条测试**一条都不红**（原有断言全是正向的）。而那句处方在
+        # "已找到竞品 + 另一条词被限流"这条可达路径上是**假**的：结论会是 ``ok``、
+        # 空白度按找到的竞品算出，不是中性。处方只能由结论层说。
+        assert "必须按中性值处理" not in message
+        assert "空白度" not in message
 
     def test_rate_limit_message_suggests_token(self, install_transport):
         install_transport(lambda request: rate_limited(403))

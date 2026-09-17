@@ -438,17 +438,20 @@ def _competitor_verdict(card: OpportunityCard) -> str:
                 "有人验证过需求，但市场现在是空的。进场前请确认它为什么停下。</p>"
             )
         hottest = max((finding.stars or 0) for finding in active)
-        # 有竞品却仍要提示"结果可能不完整"的情形有两种，**都必须说**：
-        #   * ``research_failed`` —— 还有渠道没查成，清单可能不全；
+        # 有竞品却仍要提示"结果可能不完整"的情形有三种，**都必须说**：
+        #   * 同渠道内有检索词**没查成**（限流 / 网络）—— 清单可能不全。漏掉的那次
+        #     里可能正躺着更强势的竞品。这条此前**到不了卡片**：判据只写了
+        #     ``research_failed or research_judgement_failed``，而有 findings ⇒ 状态
+        #     必是 ``ok`` ⇒ 前者恒为 False、后者在没有判定失败时也是 False。
+        #   * ``research_failed`` —— 结论本身没定论（读的是 ``research_status``）。
+        #     在这个"有 findings"的分支里它恒为 False，仍留在判据里是因为组合只有
+        #     一处定义（:attr:`OpportunityCard.research_incomplete`），不在这里手写。
         #   * ``research_judgement_failed`` —— 这些竞品**根本没验过**相关性
-        #     （判定失败时候选被全部保留，保守取舍）。后者此前到不了卡片：
-        #     有 findings ⇒ 状态必是 ``ok`` ⇒ ``research_failed`` 恒为 False，
-        #     于是"未经判定"只留在运行提示里，而卡片和一次正常判定长得一模一样。
-        partial = (
-            "（本次调研未完成，结果可能不完整）"
-            if card.research_failed or card.research_judgement_failed
-            else ""
-        )
+        #     （判定失败时候选被全部保留，保守取舍）。措辞要更强，见下面那条覆盖。
+        # ★ 判据统一走派生属性，不在这里拼布尔：这段注释本来就写着三种情形"都必须
+        # 说"，而手写的组合漏掉了第一种 —— 一句话描述意图、一行代码实现另一个意图，
+        # 正是"注释说的和代码做的不一致"最常见的来源。
+        partial = "（本次调研未完成，结果可能不完整）" if card.research_incomplete else ""
         if card.research_judgement_failed:
             partial = "（**这些竞品未经相关性判定**，是候选全量保留的结果，请点开自行判断）"
         return (

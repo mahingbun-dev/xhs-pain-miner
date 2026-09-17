@@ -176,13 +176,18 @@ def _competitor_lines(card: OpportunityCard) -> list[str]:
     # 判定失败时候选被全部保留（保守取舍），卡片会与一次正常判定**长得一模一样**，
     # 用户会把一次 LLM 抖动当成"这个方向真的已经有这些竞品"—— 那正是 M2 验收门
     # 要抓的误报。
+    #
+    # ★ 判据走 :attr:`OpportunityCard.research_incomplete`（派生属性），与 HTML 侧
+    # 同一个。原来这里写 ``card.research_failed``，在有 findings 的分支里它**恒为
+    # False**，于是"同渠道内有检索词没查成"这条真实场景在 Markdown 产物里一个字都
+    # 不提 —— 两个渲染器各写各的判据，漂移就是这么发生的。
     if card.research_judgement_failed:
         lines.append(
             "⚠️ **这些竞品未经相关性判定**（本次判定失败，候选被全量保留）—— "
             "它们不一定真的与这个痛点相关，请点开自行判断，"
             "也不要据此认为这个方向已经有人做了。"
         )
-    elif card.research_failed:
+    elif card.research_incomplete:
         lines.append("（本次调研未完成，结果可能不完整）")
 
     lines.extend(_trace_lines(card))

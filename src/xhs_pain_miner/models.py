@@ -533,6 +533,30 @@ class OpportunityCard:
         return self.research_status not in ("ok", "no_competitor")
 
     @property
+    def research_incomplete(self) -> bool:
+        """竞品清单是否**可能不全**。与 :attr:`research_failed` 是两件事，可互相独立。
+
+        * **找到了竞品、但同渠道内另一条检索词被限流** → ``research_failed`` 为
+          ``False``（空白度按找到的竞品算，这是刻意的：已经查到真实竞品，就不该
+          断言"没查成"），但清单**确实不完整** —— 漏掉的那次里可能有更强势的对手。
+        * **相关性判定失败** → 全部候选被保留，``research_failed`` 也是 ``False``，
+          而"未经判定"同样意味着这份清单不能当完整结论看。
+
+        渲染层原本只判这两个布尔，于是第一种情形下卡片一个字都不提。而
+        ``render/html.py`` 里那段注释恰恰写着这两种情形"**都必须说**" —— 说明意图
+        本就如此，只是判据没覆盖到。这个属性就是把那份意图补成代码。
+
+        派生而非字段，理由同 :attr:`research_failed`：它是从已有字段算出来的不变式。
+        放在这里而不是各渲染器里，是为了让两个渲染器共用一处定义、不会各写一份而
+        慢慢漂移（这正是它出现的原因）。
+        """
+        return (
+            self.research_failed
+            or self.research_judgement_failed
+            or any(not trace.succeeded for trace in self.research_queries)
+        )
+
+    @property
     def has_active_competitor(self) -> bool:
         """是否存在仍在活跃维护的竞品。"""
         return any(not c.is_stale for c in self.competitors)

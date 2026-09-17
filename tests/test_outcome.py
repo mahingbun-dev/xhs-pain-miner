@@ -280,12 +280,74 @@ class TestWarningFor:
 
         只丢一句"无法判断"会让用户以为这个渠道对他没用 —— 实际上换个更贴近
         "用户会去找什么工具"的说法往往就能搜到。
+
+        这里原来还断言 ``"中性值" in text``，那条断言守的是渠道层去说"分数怎么算"。
+        它已随本轮改动删除：渠道层不知道合并结果，说不了这件事（见
+        :meth:`test_no_branch_claims_how_the_gap_is_scored`）。
         """
         text = warning_for("unsearchable", [empty_trace()], subject="防晒搓泥")
         assert text is not None
         assert "没有返回任何结果" in text
         assert "检索不到 ≠ 不存在" in text
-        assert "中性值" in text
+
+    def test_unsearchable_splits_returned_nothing_from_not_searched(self):
+        """★ "平台返回 0 条"与"这次没查成"必须**分开说** —— 两者的下一步动作不同。
+
+        前者是换个说法再搜，后者是等额度或网络恢复。该分支写于 ``unsearchable``
+        只有"全成功但全 0 命中"一种成因的年代；后来 :func:`classify_status` 把
+        "部分失败"也路由到 ``unsearchable``，文案没跟上 —— 独立验证实测：一条被限流的
+        检索词会被说成"在该渠道没有返回任何结果"，而它实际是**调用失败**。
+
+        这与 :func:`_unresolved_warning` 主张"两类要分开报数"是同一条道理。
+        """
+        text = warning_for(
+            "unsearchable",
+            [empty_trace("美妆 成分查询"), failed_trace("笔记 导出")],
+            subject="防晒搓泥",
+        )
+        assert text is not None
+        assert "「美妆 成分查询」" in text
+        assert "没有返回任何结果" in text
+        assert "「笔记 导出」" in text
+        assert "没有查成" in text
+
+    def test_unsearchable_does_not_mention_not_searched_when_everything_returned_zero(self):
+        """全都成功但 0 命中时，不许出现"没查成"那句 —— 那句话在这里是假的。"""
+        text = warning_for("unsearchable", [empty_trace(), empty_trace("护肤")], subject="x")
+        assert text is not None
+        assert "没有返回任何结果" in text
+        assert "没有查成" not in text
+
+    def test_no_branch_claims_how_the_gap_is_scored(self):
+        """★★ **反向守卫**：渠道层文案里不得出现任何关于分数的主张。
+
+        这些文案会被 :meth:`ResearchOutcome.merged` 原样拼进最终结论，而合并后的
+        空白度可能**不是**中性值（另一个渠道查到了竞品）。实测产物里同时出现
+        「其「竞品空白度」按中性值计」和一张按竞品算出的空白度（0.5155）—— 与 M2
+        要消灭的自相矛盾是同一类。分数只能由 :func:`_unresolved_warning` 说，它读的是
+        **合并之后**的卡片。
+
+        独立验证发现这是**反向**缺口：往轨迹文案末尾加回处方句，1148 条测试一条都不红。
+        已有的断言全是正向的（"必须有某句话"），没有一条断言"不许有某句话"。
+        """
+        cases = {
+            "failed": warning_for("failed", [failed_trace()], subject="x"),
+            "unsearchable·0 命中": warning_for("unsearchable", [empty_trace()], subject="x"),
+            "unsearchable·无检索词": warning_for("unsearchable", [], subject="x"),
+            "unsearchable·部分失败": warning_for(
+                "unsearchable", [empty_trace(), failed_trace()], subject="x"
+            ),
+            "ok·部分失败": warning_for("ok", [ok_trace(), failed_trace()], subject="x"),
+            "no_competitor": warning_for(
+                "no_competitor",
+                [QueryTrace(query="a", channel="github", hits=9, kept=0)],
+                subject="x",
+            ),
+        }
+        for label, text in cases.items():
+            assert text is not None, label
+            for claim in ("空白度", "中性"):
+                assert claim not in text, f"「{label}」的文案里出现了分数主张：{text}"
 
     def test_failed_says_it_failed_not_absent(self):
         text = warning_for("failed", [failed_trace()], subject="搓泥")
