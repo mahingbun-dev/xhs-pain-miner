@@ -101,8 +101,34 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("XHS_COLLECTOR_PLUGIN", "COLLECTOR_PLUGIN"),
     )
     """``collector_backend=plugin`` 时的 Python 模块路径，形如 ``my_pkg.my_collector``。"""
-    xhs_cookie: str | None = None
-    """仅在使用 MCP 后端时需要，且仅保存在本机。"""
+
+    # -- MCP 后端（对接本机运行的 xiaohongshu-mcp 服务）---------------------------
+    # 登录态由那个服务自己保管（扫码登录后存在服务端本机），所以这里**没有**
+    # cookie 配置项；本程序只负责把地址与可选的鉴权 token 传过去。
+    xhs_mcp_url: str = "http://127.0.0.1:18060"
+    """``xiaohongshu-mcp`` 服务的地址（环境变量 ``XHS_MCP_URL``）。
+
+    默认值是那个服务的默认监听地址。**不要指向公网地址** —— 采集应当在本机完成，
+    把登录态交给远端服务既超出本工具的定位，也让"数据不离开本机"这条设计失效。
+    """
+    xhs_mcp_token: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("XHS_MCP_TOKEN", "XHS_MCP_AUTH_TOKEN"),
+    )
+    """服务端启用了鉴权（``AUTH_TOKEN``）时的 Bearer token。未启用则留空。
+
+    两个名字都接受：``XHS_MCP_TOKEN`` 是本项目的主名，``XHS_MCP_AUTH_TOKEN`` 与被对接
+    服务自己的 ``AUTH_TOKEN`` 对得上，配置时不容易张冠李戴。只保存在本机，
+    与 LLM 的 API Key 同级对待。
+    """
+    xhs_mcp_timeout: float = 120.0
+    """调用 ``xiaohongshu-mcp`` 的单次请求超时（秒）。
+
+    比其它渠道（15 秒）大一个量级：该服务用浏览器自动化取数据，加载全部评论时
+    几十秒是常态。定小了会把"慢"误报成"采集失败"。默认值与
+    :data:`~xhs_pain_miner.collectors.mcp.DEFAULT_TIMEOUT` 保持一致 ——
+    两处不一致会让"直接构造后端"与"走配置构造"得到不同行为。
+    """
 
     # --------------------------------------------------------- 痛点发现方式 --
     pain_discovery: Literal["taxonomy", "cluster"] = "taxonomy"

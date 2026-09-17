@@ -57,7 +57,7 @@
 | 采集后端插件协议 | ✅ 可用 |
 | `mine` 完整分析（清洗 → LLM 归纳痛点 + 向量分类 → 竞品调研 → 机会分 → 报告） | 🔶 M1 已实现 |
 | VLM 图片分析（`mine --deep`）+ 成本控制 | 🔶 M1 已实现 |
-| MCP 采集后端 | ⏳ M3 |
+| MCP 采集后端（xiaohongshu-mcp 适配） | 🔶 M3 已实现 |
 | Claude Code / Codex Skill | ⏳ M4 |
 
 README 中的功能描述与路线图严格对应上表，不提前宣称未实现的能力。
@@ -194,7 +194,12 @@ xhs-pain-miner mine -k 防晒霜 -n 200
 |---|---|---|
 | `fixture` | 内置脱敏样例数据，用于 CI / Demo / 离线验证 | ✅ 默认 |
 | `plugin` | 加载**你本机自备**的采集器 | ✅ |
-| `mcp` | 对接 [xiaohongshu-mcp](https://github.com/xpzouying/xiaohongshu-mcp)（Apache-2.0） | ⏳ M3 |
+| `mcp` | 适配 [xiaohongshu-mcp](https://github.com/xpzouying/xiaohongshu-mcp)（Apache-2.0）—— 适配器在仓库内，采集服务由你本机运行 | 🔶 M3 已实现 |
+
+> `mcp` 是上面那条规则的**有边界的例外**：xiaohongshu-mcp 是 Apache-2.0，可商用、可再分发。
+> 即便如此，仓库里也没有一行采集代码 —— 采集由你本机运行的服务完成。
+> 安装、配置与三个硬约束（**一次搜索只有一页**、每篇要再请求一次、评论按需走慢路径）
+> 见 [docs/collector-mcp.md](docs/collector-mcp.md)。
 
 写一个自己的后端只要两步：
 
@@ -271,11 +276,13 @@ xhs-pain-miner collect -k 防晒霜 --backend plugin
 - [ ] 小红书站内已有工具检索 —— 需要用户自备的采集器（见 M3 的插件协议）
 - **验收**：竞品调研人工抽检准确率达标 · 无误报
 
-### M3 · 真实采集 ⏳
-- [ ] `CollectorBackend` 插件协议落地文档
-- [ ] MCP 后端（xiaohongshu-mcp）
-- [ ] 限速、断点续跑
-- **验收**：真实后端跑通一个品类 · **代码审计：仓库不含任何受限代码**
+### M3 · 真实采集 🔶
+- [x] `CollectorBackend` 插件协议 —— [docs/collector-plugin.md](docs/collector-plugin.md)
+- [x] MCP 后端（xiaohongshu-mcp）—— [docs/collector-mcp.md](docs/collector-mcp.md)
+- [ ] 断点续跑 —— **未做**，中途失败需重跑。（限速无需另做：请求天然串行，且被对接的
+  服务在每次导航/点击前后自带拟人延时。）
+- **验收**：真实后端跑通一个品类（**待你本人**，需要你本机已登录的采集服务）·
+  **代码审计：仓库不含任何受限代码**（待做）
 
 ### M4 · 商业化地基 ⏳
 - [ ] Claude Code / Codex Skill 封装

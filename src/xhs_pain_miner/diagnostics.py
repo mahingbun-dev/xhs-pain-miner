@@ -1,7 +1,24 @@
 """环境诊断 —— ``xhs-pain-miner doctor`` 的实现。
 
-诊断只做本地检查，**不发任何网络请求**（避免拖慢命令，也避免在用户不知情时
-把 API Key 送到网络上做连通性测试）。
+**不测 LLM / VLM / Embedding 的连通性**：那需要把 API Key 送到网络上，用户没要求
+就不该做（``_check_llm_config`` 之类的检查因此只看配置是否完整）。
+
+**但采集后端那一项是例外，它确实会发请求**：`_check_collector` 调
+``CollectorBackend.available()``，而协议把"后端当前是否可用"定义为后端自己的判断 ——
+``mcp`` 后端会去问 `xiaohongshu-mcp` 的 `/health` 与登录状态（后者在服务端还要开一个
+浏览器页面，有几秒延迟），``plugin`` 后端问什么由插件自己决定。
+
+这条区别值得写下来：本文件此前笼统地写着"不发任何网络请求"。那句话**从来不是设计上的
+保证，只是按当时的可达路径看起来成立**，而且只对 ``fixture`` 那条路径成立 ——
+
+* ``plugin`` 路径从一开始就取决于用户插件：本仓库的插件文档把网络调用直接写进了模板
+  （``docs/collector-plugin.md`` 里 ``available()`` 的示例就是 ``my_client.ping()``），
+  连"有没有副作用"都只能由插件作者决定；
+* ``mcp`` 路径是 M3 才接上的，在那之前它构造即抛错、走不到 ``available()``，
+  于是那条笼统的说法在那段时间里"碰巧"没错。
+
+**别把它读回成一条不变式。** 判据是"这个后端自己的 `available()` 做什么"，
+不是"doctor 不发请求"。
 """
 
 from __future__ import annotations
@@ -195,10 +212,27 @@ def _check_collector(settings: Settings) -> Check:
         "采集后端",
         "warn",
         detail,
-        hint=(
-            "若为自备插件，请检查登录态；若尚未配置采集器，可先用 --backend fixture 体验完整流程"
-        ),
+        hint=_collector_hint(settings.collector_backend),
     )
+
+
+_HINTS = {
+    "plugin": "若为自备插件，请检查登录态；若尚未配置采集器，可先用 --backend fixture 体验完整流程",
+    # 「没装」与「装了没起」是两件事，但用户看到的是同一句「连不上」——
+    # 提示里两条都给出，省一次来回。详见 docs/collector-mcp.md。
+    "mcp": "请确认 xiaohongshu-mcp 已安装并在本机运行（首次使用需先用它自带的登录工具扫码登录）；"
+    "尚未配置采集器时可先用 --backend fixture 体验完整流程",
+}
+"""按后端给出可操作的下一步。
+
+刻意不写"检查登录态"这种通用话术：``mcp`` 后端的登录态由被对接的服务保管，
+用户在本仓库里找不到任何可"检查"的东西，而 ``plugin`` 后端才需要自己管 cookie。
+"""
+
+
+def _collector_hint(backend: str) -> str:
+    """取得该采集后端不可用时应当给出的提示。"""
+    return _HINTS.get(backend, "尚未配置采集器时可先用 --backend fixture 体验完整流程")
 
 
 def _nearest_existing(path: Path) -> Path:
@@ -212,9 +246,9 @@ def _nearest_existing(path: Path) -> Path:
 def _check_paths(settings: Settings) -> Check:
     """检查输出目录与数据库目录是否可写。
 
-    这里**不会创建任何目录**。``doctor`` 被文档描述为"只做本地检查"，
-    不该在用户看到诊断结论之前就先写用户主目录 —— 检查最近一个已存在祖先的
-    可写性即可达到同样目的。
+    这里**不会创建任何目录**。``doctor`` 的定位是"只读地报告现状"，不该在用户
+    看到诊断结论之前就先写用户主目录 —— 检查最近一个已存在祖先的可写性即可达到
+    同样目的。
     """
     problems: list[str] = []
     for label, path in (("输出目录", settings.output_dir), ("数据库目录", settings.db_path.parent)):

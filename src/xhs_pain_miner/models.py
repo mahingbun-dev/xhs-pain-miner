@@ -172,6 +172,17 @@ class RawCorpus:
     comments: list[RawComment] = field(default_factory=list)
     backend: str = ""
     collected_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    warnings: list[str] = field(default_factory=list)
+    """采集阶段产生的、**用户必须看到**的提示。
+
+    与 :attr:`MiningResult.notes` 的区别是发生的位置：这里说的是**这份语料本身**
+    的构成，而 ``notes`` 说的是分析过程。分开的理由是它们影响的东西不同 ——
+    ``PainCluster.size``（提及次数）完全由这份语料决定，所以"这次少采了 N 篇"
+    必须跟着语料一起走，不能只留在某个后端的实例属性里等着被谁想起来读。
+
+    后端**不要**往这里塞"采集失败"：失败按 :class:`~xhs_pain_miner.collectors.base.CollectorError`
+    的约定抛异常。这里放的是"采集成功了，但结果不完整/不达预期"。
+    """
 
     @property
     def total_images(self) -> int:

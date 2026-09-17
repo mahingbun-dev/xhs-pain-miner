@@ -12,6 +12,10 @@
 因此本项目采取与 Playwright 相同的策略：**只定义协议，不携带实现**。
 拥有合法采集器的用户写一个薄适配器，通过环境变量指向它即可。
 
+> **没有自己的采集器？** 用 `mcp` 后端对接 [xiaohongshu-mcp](https://github.com/xpzouying/xiaohongshu-mcp)
+> （Apache-2.0），见 [collector-mcp.md](collector-mcp.md)。它是上面这条规则的**有边界的例外**，
+> 边界同样是许可证 —— 那个适配器在仓库内，采集服务仍然在你本机运行，仓库里依然没有采集代码。
+
 ```
 你的仓库（AGPL-3.0）              用户本机
   collectors/                      你自己合法持有的采集器
