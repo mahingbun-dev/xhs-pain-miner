@@ -24,10 +24,11 @@ from xhs_pain_miner.cli import main
 from xhs_pain_miner.config import Settings
 from xhs_pain_miner.llm.base import LLMError, LLMResponse
 from xhs_pain_miner.models import RunCost
-from xhs_pain_miner.pain_miner import normalize_keyword
+from xhs_pain_miner.pain_miner import _NOT_SEARCHED_WARNING, normalize_keyword
 from xhs_pain_miner.research import appstore as appstore_module
 from xhs_pain_miner.research import github as github_module
 from xhs_pain_miner.research import query, relevance
+from xhs_pain_miner.scoring.opportunity import NEUTRAL
 
 _MANAGED_ENV = (
     "LLM_API_KEY",
@@ -359,9 +360,21 @@ class TestPainMinerFacade:
         assert "请不要据此选题" in first
 
     def test_mine_announces_disabled_research(self):
-        """关闭竞品调研必须留下痕迹 —— 静默关闭会让用户以为查过了。"""
+        """关闭竞品调研必须留下痕迹 —— 静默关闭会让用户以为查过了。
+
+        并且那条痕迹里的中性值必须来自 :data:`NEUTRAL`。独立验证发现：把
+        ``pain_miner`` 里这两处（本分支 + ``_NOT_SEARCHED_WARNING``）的 ``0.5``
+        改成 ``0.9``，全量 1264 条测试**一条不红** —— 原来只断言了"有这句话"，
+        没断言"这句话里的数是对的"。
+        """
         result = _miner().mine("防晒霜", notes_count=20)
-        assert any("竞品调研已关闭" in note for note in result.notes)
+        message = next((note for note in result.notes if "竞品调研已关闭" in note), "")
+        assert message, f"关闭调研没有留下痕迹，实际提示: {result.notes!r}"
+        assert f"按中性值 {NEUTRAL} 计算" in message
+
+    def test_not_searched_warning_uses_the_constant(self):
+        """同上，另一处硬编码 —— 它同样印在运行提示里。"""
+        assert f"按中性值 {NEUTRAL} 计算" in _NOT_SEARCHED_WARNING
 
     def test_disabled_research_never_claims_no_competitors(self):
         """★ 关闭调研时，空白度必须是中性值，不能是「查证过没有竞品」。

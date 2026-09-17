@@ -853,7 +853,7 @@ class TestPartialResearchReachesTheCard:
 
 
 class TestPrintedNeutralValueIsTheRealOne:
-    """★ 产物里印的中性值必须**等于**那张卡实际取到的空白度。
+    """★ **卡片结论里**印的中性值必须等于那张卡实际取到的空白度。
 
     独立验证发现这一格此前无人守：把 Markdown 的 ``_esc(NEUTRAL)`` 改成字面量
     ``1.0``，全量 1259 条测试**一条都不红**，而产物会印出
@@ -866,6 +866,17 @@ class TestPrintedNeutralValueIsTheRealOne:
 
     这里不断言"必须等于 0.5" —— 那是把常量抄一遍，改常量时测试跟着改、永远不红。
     断言的是**印出来的数 == 那张卡实际的空白度**，两侧任何一个走偏都会红。
+
+    .. note::
+       本类只覆盖**卡片结论那一行**。产物里还有一个位置印中性值 —— 末尾的"评分口径"
+       脚注，它由 ``test_the_caliber_footnote_uses_the_real_constant`` 单独守。
+       （这句话是有来由的：本类原先写的是"产物里印的中性值"，独立验证实测那个说法
+       **过头了** —— 脚注单改、两处一起改，全量测试都一条不红。）
+
+    .. warning::
+       这两条守卫隐含一个约束：值必须能被渲染器的格式化位数原样印出。实测
+       ``NEUTRAL = 0.75`` 时会红（``_num(0.75, 1)`` 印成 ``0.8``），``0.4`` 时不会。
+       当前 ``0.5`` 不受影响；真要改 ``NEUTRAL``，先确认它与渲染位数相容。
     """
 
     def _unresearched_card(self) -> OpportunityCard:
@@ -899,6 +910,17 @@ class TestPrintedNeutralValueIsTheRealOne:
         card = self._unresearched_card()
         gap = card.score_breakdown["competitor_gap"]
         assert f"按中性值 {gap} 计" in render_markdown(make_result(cards=[card]))
+
+    def test_the_caliber_footnote_uses_the_real_constant(self):
+        """★ 产物末尾"评分口径"脚注里的中性值也必须来自 ``NEUTRAL``。
+
+        独立验证发现这一格无人守：把 ``render/html.py`` 与 ``render/markdown.py``
+        脚注里的 ``0.5`` 改成 ``0.9``（单改、或两处一起改），全量 1264 条测试
+        **一条不红** —— 上面两条守卫只钉了"卡片结论那一行"。同一个数字在两个地方
+        各写一遍，正是"守卫覆盖了这里、漏掉了那里"的典型。
+        """
+        assert f"取中性值 {NEUTRAL}" in render_html(make_result())
+        assert f"取中性值 {NEUTRAL}" in render_markdown(make_result())
 
 
 class TestBothRenderersAgreeOnResearchNotes:

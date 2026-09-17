@@ -42,7 +42,7 @@ from xhs_pain_miner.research import appstore, github
 from xhs_pain_miner.research.outcome import QueryTrace, ResearchOutcome, build_outcome
 from xhs_pain_miner.research.query import SolutionQuery, build_solution_queries
 from xhs_pain_miner.research.relevance import judge_relevance
-from xhs_pain_miner.scoring.opportunity import build_cards
+from xhs_pain_miner.scoring.opportunity import NEUTRAL, build_cards
 from xhs_pain_miner.text import REMOVE_INVISIBLE
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -73,7 +73,7 @@ T1 的检索词生成会让模型为 ``chrome`` / ``xhs`` 也出词（提示词�
 """
 
 _NOT_SEARCHED_WARNING = (
-    "本次没有做竞品调研，「竞品空白度」因子按中性值 0.5 计算 —— 未调研不等于没有竞品。"
+    f"本次没有做竞品调研，「竞品空白度」因子按中性值 {NEUTRAL} 计算 —— 未调研不等于没有竞品。"
 )
 """没查过时的结论警告（关闭调研 / 超出调研上限的簇共用）。
 
@@ -538,7 +538,8 @@ class PainMiner:
 
         if not self.settings.research_enabled:
             messages.append(
-                "竞品调研已关闭，「竞品空白度」因子按中性值 0.5 计算 —— 未调研不等于没有竞品。"
+                "竞品调研已关闭，「竞品空白度」因子按中性值 "
+                f"{NEUTRAL} 计算 —— 未调研不等于没有竞品。"
             )
             # ★ 关闭调研时，每个簇的结论必须是 ``unsearchable``（没查过），
             # 而不是"查证过确实没有竞品"。

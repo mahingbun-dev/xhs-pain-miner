@@ -443,8 +443,9 @@ def _competitor_verdict(card: OpportunityCard) -> str:
         #   * 同渠道内有检索词**没查成** —— 清单可能不全，漏掉的那次里可能正躺着更强势
         #     的竞品。**流水线产出的卡片上这条曾到不了这里**：判据原先只写
         #     ``research_failed or research_judgement_failed``，而流水线里"有 findings ⇒
-        #     状态必是 ``ok``"，两个布尔都是 False。（独立验证实测：把判据窄化回旧写法，
-        #     同一张卡 HTML 会提示、Markdown 不提示，而全量测试一条不红。）
+        #     状态必是 ``ok``"，两个布尔都是 False。
+        #     （"两份产物必须同判"这件事本身也有守卫：
+        #     ``tests/test_render.py::TestBothRenderersAgreeOnResearchNotes``。）
         #   * ``research_failed`` —— 结论本身没定论（读 ``research_status``）。流水线产出的
         #     卡片在这个分支里它是 False；**手工构造**的卡片可以是 True（同一提交的测试
         #     参数里就有"查到竞品 · 未定论"那一格），所以它仍然留在判据里。
@@ -647,7 +648,8 @@ def _render_caliber(card: OpportunityCard, *, weights: dict[str, float] | None) 
     return (
         '<details class="caliber"><summary>评分口径</summary>'
         "<p>机会分 = 100 × Σ(权重 × 因子得分)，因子得分均已归一化到 0-1。"
-        "缺数据的因子取中性值 0.5 —— 0 的含义是「确认这个维度很差」，与「不知道」是两回事。</p>"
+        f"缺数据的因子取中性值 {_num(NEUTRAL, 1)} —— 0 的含义是「确认这个维度很差」，"
+        "与「不知道」是两回事。</p>"
         f"{table}<p>{_esc(note)}</p></details>"
     )
 
