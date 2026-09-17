@@ -3,8 +3,14 @@ name: CI
 on:
   push:
     branches: [main, develop]
+  # **不限定 base 分支**。原先是 ``branches: [main]``，于是任何以集成分支
+  # （如 ``feat/m2-research``）为 base 的 PR，一条检查都不会触发 —— 而这类 PR
+  # 恰恰改动量更大、还要再经一次合并。它们会以 "0 个检查" 的状态摆在评审页上，
+  # 与"检查全绿"在视觉上难以区分（两者都只剩一个可点的合并按钮），
+  # 于是最需要检查的那一类 PR 反而在零信号下被合掉。
+  #
+  # 触发条件与「CI 要跑什么」是两件事：这里只放开 base，job 内容一个字没动。
   pull_request:
-    branches: [main]
 
 jobs:
   lint:
