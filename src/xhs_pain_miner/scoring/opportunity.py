@@ -4,7 +4,7 @@
 
     机会分 = 100 × (
         0.25 × 痛点强度     (情感极性 × 证据权重)
-      + 0.20 × 提及量       (log 归一)
+      + 0.20 × 提及量       (相对排名 × 绝对置信度)
       + 0.20 × 增长趋势     (时间分布)
       + 0.25 × 竞品空白度   (调研结果)
       + 0.10 × 实现难度⁻¹
@@ -32,7 +32,10 @@
                               ``log1p(likes)`` 压缩，避免"哪篇笔记最火"碾压
                               其它证据（见 :class:`~xhs_pain_miner.models.TextUnit`
                               的 ``weight`` 说明）。
-``mention_volume``            ``log1p(size) / log1p(max_size)``。
+``mention_volume``            ``log1p(size) / log1p(max_size)``（相对排名）× 一个
+                              **有界**的绝对置信度项（``≤ 1``，按
+                              :data:`MENTION_VOLUME_REFERENCE` 饱和，见
+                              :func:`mention_volume`）。
 ``growth_trend``              证据按时间跨度中点分前后两半，取后半段占比；
                               ``stage`` 只做 ±0.10 的修正。
 ``competitor_gap``            无竞品 1.0 / 全部停更 0.75 / 有活跃竞品则按数量与
@@ -102,6 +105,17 @@ ENGAGEMENT_REFERENCE_LIKES = 50.0
 
 取 50 而不是 5000：评论区的高赞通常在几十量级，用大 V 笔记的点赞量做基准会让
 几乎所有证据都贴近 0，热度系数退化成常数。
+"""
+
+MENTION_VOLUME_REFERENCE = 50.0
+"""「提及量」因子的**绝对**参照：提及次数达到该值即视为证据充分，置信度项饱和为 1.0。
+
+与 :data:`ENGAGEMENT_REFERENCE_LIKES` 同量级是刻意的 —— 两者回答同一个问题
+（"多少人才算数"）：一条抱怨被 50 条独立发言提到，就不再是个人怪癖。
+
+这是 :func:`mention_volume` 里那个**绝对项**，与语料规模无关。相对归一只回答
+"在本次语料里排第几"，若没有这个绝对参照，"头名"永远拿满分 —— 一个只被 3 次
+提及的痛点在薄语料里会和 543 次提及的痛点同分，"兼作置信度"就是一句空话。
 """
 
 STAGE_TREND_ADJUSTMENT: Mapping[str, float] = {
@@ -271,7 +285,11 @@ class ScoreWeights:
     """痛点强度。用户有多难受 —— 不难受的痛点做出来没人付钱。"""
 
     mention_volume: float = 0.20
-    """提及量。兼作置信度：只说了一次的痛点可能是个人怪癖。"""
+    """提及量。兼作置信度：只说了一次的痛点可能是个人怪癖。
+
+    置信度由**绝对**提及量决定（见 :func:`mention_volume` 的绝对项），不会被语料
+    规模放大 —— 薄语料里的头名拿不到满分。
+    """
 
     growth_trend: float = 0.20
     """增长趋势。现在的抱怨量和半年前比是在涨还是在落。"""
@@ -348,22 +366,46 @@ def pain_strength(cluster: PainCluster) -> float:
 
 
 def mention_volume(cluster: PainCluster, *, max_size: int) -> float:
-    """提及量 —— ``log1p(size) / log1p(max_size)``。
+    """提及量 —— 相对排名 × 绝对置信度，两项都取 log 归一。
 
-    用对数是因为痛点提及量是长尾分布：最大的簇可能是第 10 名的十几倍，线性归一
-    会让除了头名以外的所有痛点都挤在 0 附近，分数全无区分度。
+    **相对项** ``log1p(size) / log1p(max_size)``：在本次语料里排第几。用对数是因为
+    痛点提及量是长尾分布：最大的簇可能是第 10 名的十几倍，线性归一会让除了头名以外
+    的所有痛点都挤在 0 附近，分数全无区分度。
+
+    **绝对项** ``min(1, log1p(size) / log1p(MENTION_VOLUME_REFERENCE))``：证据够不够
+    硬。这一项是**置信度** —— 只说了一次的痛点可能是个人怪癖。少了它，相对项会让
+    任何语料里的头名恒等于 ``log1p(max_size) / log1p(max_size) = 1.0``：只有 12 次
+    提及的痛点在薄语料里会和 543 次提及的痛点同分。上一轮把归一化基准从"全部簇"
+    改成"排除噪声桶"是对的（噪声桶不该稀释真实痛点），但它同时拿掉了噪声桶**偶然**
+    提供的绝对锚点，绝对项就是来补这个缺口的。
+
+    两项**相乘**而不是取 ``min(相对项, 绝对项)``：后者在 ``max_size`` 已达参照时恒
+    等于相对项 —— 因为那时 ``相对项 ≤ 绝对项`` 总成立 —— 于是绝对项**只在薄语料里
+    生效**，健康语料里那些绝对量同样不足的尾部簇原样拿回旧分数（543 次语料里 17 次
+    提及仍得 0.46）。那等于"薄语料换一套公式"，不是置信度。相乘则对所有证据不足的
+    簇一律打折，且因两项都对 ``size`` 严格递增，排名信息完整保留。
 
     Args:
         cluster: 痛点簇。
-        max_size: 归一化基准 —— **参与机会评估**的簇里最大的 size。噪声桶
-            （未归类文本）已被挡在卡片之外，不充当基准，理由见 :func:`build_cards`。
+        max_size: **相对项**的归一化基准 —— **参与机会评估**的簇里最大的 size。
+            噪声桶（未归类文本）已被挡在卡片之外，不充当基准，理由见
+            :func:`build_cards`。绝对项不受该参数影响。**不校验**
+            ``size <= max_size``：调用方（含直接使用本函数的第三方）传入不一致的
+            基准时不报错也不抛异常，照公式计算后由 ``_clamp`` 收敛到 ``[0, 1]``
+            —— 保持"任何输入都返回一个可用数字"这条既有契约。
 
     Returns:
-        ``[0, 1]``。``max_size <= 0`` 时返回 0。
+        ``[0, 1]``。``max_size <= 0`` 或 ``size <= 0`` 时返回 0。取到 1.0 的条件是
+        **既是本次语料里最大的痛点、绝对量又已达** :data:`MENTION_VOLUME_REFERENCE`
+        —— 满分从此表示"最多且证据充分"，不再是"只要最多"。``size > max_size``
+        （契约外输入）时 clamp 作用在**乘积**上：``mv(49, 10)`` 返回 1.0。
     """
     if max_size <= 0 or cluster.size <= 0:
         return 0.0
-    return _clamp(math.log1p(cluster.size) / math.log1p(max_size))
+    size = cluster.size
+    relative = math.log1p(size) / math.log1p(max_size)
+    confidence = min(1.0, math.log1p(size) / math.log1p(MENTION_VOLUME_REFERENCE))
+    return _clamp(relative * confidence)
 
 
 def _timestamped_evidence(cluster: PainCluster) -> list[Evidence]:
@@ -724,6 +766,9 @@ def build_cards(
     #   再拿它当基准会让「未归类文本越多 → 所有真实痛点的提及量分越低」，
     #   等于用分类质量差去惩罚真实痛点。提及次数是本产品的核心指标，
     #   它的基准只能来自真实痛点自己。
+    # 该基准只决定 `mention_volume` 的**相对项**；绝对项由 size 与
+    # MENTION_VOLUME_REFERENCE 决定，不受这里影响 —— 所以"基准该取谁"与
+    # "头名该不该拿满分"是两个独立的问题。
     evaluated = [c for c in clusters if include_noise or not c.is_noise]
     max_size = max((cluster.size for cluster in evaluated), default=0)
     selected = [
@@ -748,9 +793,27 @@ def build_cards(
     ]
     cards.sort(key=lambda card: (-card.score, -card.pain.size, card.id))
 
+    # ★ 合并冲突的取舍：这一块两侧都改了，不是"两边都留"。
+    #
+    # main（PR #2，提及量绝对锚点）在这之前保留的是旧的 `failed_hit` 警告，它数的是
+    # 调用方传进来的 `failed: set[str]`。M2 已经把那个参数换成了 `outcomes`，并把这句
+    # 警告换成 :func:`_unresolved_warning`（按 `unsearchable` / `failed` 分类报数，是
+    # 旧文案的**超集**：旧的只说"调研失败"，新的把"检索不到"也算了进去，而后者恰恰
+    # 是 M2 修掉的那个假空白）。所以这里**只保留 HEAD 侧**——留着旧的 `failed_hit`
+    # 会引用一个已不存在的变量，直接 `NameError`。
     unresolved = [card for card in cards if card.research_failed]
     if unresolved:
         warnings.append(_unresolved_warning(unresolved))
+
+    # 语料规模必须显式说出来：绝对项生效后，薄语料里的头名不再是满分，而用户看到
+    # 「提及量 0.65」时最自然的解读是"算错了"。这条提示把"证据量不足"这个**事实**
+    # 摆出来，而不是让它变成一个沉默的低分。
+    if selected and max_size < MENTION_VOLUME_REFERENCE:
+        warnings.append(
+            f"本次语料规模偏小：最大的痛点也只有 {max_size} 次提及（证据充分线为 "
+            f"{MENTION_VOLUME_REFERENCE:.0f} 次），「提及量」因子已按绝对证据量打折 "
+            "—— 头名不是满分，这不代表方向不好，只代表样本还不够多"
+        )
     if all(not cluster.feasibility.strip() for cluster in selected) and selected:
         warnings.append(
             "全部痛点都没有难度描述（feasibility 为空），标注阶段可能未回填难度 —— "
