@@ -250,7 +250,7 @@ xhs-pain-miner collect -k 防晒霜 --backend plugin
 - [x] 多因子机会分
 - [x] 单文件 HTML 机会卡片
 - [x] VLM 图片分析（`--deep`）+ 成本控制
-- **验收**：端到端跑通 ✅ · 频次误差 < 15% ✅（机制下限已由 `tools/eval_clustering.py` 自动验证）· 人工盲评 20 张卡片「有用率 ≥ 60%」🔶 待人工完成 · VLM 成本实测报告 🔶 待真实 API Key
+- **验收**（逐条步骤见 [验收清单](docs/acceptance-checklist.md)）：端到端跑通 ✅ · 频次误差 < 15% 🔶（机制下限已由 `tools/eval_clustering.py` 自动验证，端到端误差待真实 Key）· 人工盲评 20 张卡片「有用率 ≥ 60%」🔶 待你本人 · VLM 成本实测报告 🔶 待真实 Key
 
 > **痛点归集为什么不用聚类**：M1 实测 HDBSCAN 在 1142 条语料上聚出 **171 个簇**（真实痛点只有 10 个），
 > purity 0.996 但 coverage 只有 0.095；换 KMeans 或簇质心合并只是在 purity 与 coverage 之间二选一。
