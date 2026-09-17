@@ -164,11 +164,16 @@ def _competitor_lines(card: OpportunityCard) -> list[str]:
         lines.append(f"- {_link(finding.url, finding.name)} — {' · '.join(parts)}")
         # 平台描述是"这条为什么算竞品"的唯一依据，人工抽检要用它 —— 而 Markdown 是
         # **要发出去**的那一份，读它的人更没法自己去查。缩进一层，不抢竞品行的重心。
-        if finding.description:
-            shown = finding.description
-            if len(shown) > _COMPETITOR_DESC_CHARS:
-                shown = shown[: _COMPETITOR_DESC_CHARS - 1] + "…"
-            lines.append(f"  > {_esc(shown)}")
+        #
+        # 与 HTML 侧同一条口径，挡住三件"其实等于没有"的输入：``None``、非字符串、
+        # 纯空白串 —— 最后一个放过去会印出一个空的引用块行。上游 ``_describe``
+        # 目前会把它们都压成空串，但那是调用方的行为、不是渲染层可以依赖的保证。
+        raw = finding.description if isinstance(finding.description, str) else ""
+        text = raw.strip()
+        if text:
+            if len(text) > _COMPETITOR_DESC_CHARS:
+                text = text[: _COMPETITOR_DESC_CHARS - 1] + "…"
+            lines.append(f"  > {_esc(text)}")
         if finding.gap_notes:
             lines.append(f"  > {_esc(finding.gap_notes)}")
 

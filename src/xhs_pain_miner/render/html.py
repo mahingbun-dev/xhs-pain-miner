@@ -543,10 +543,26 @@ def _render_competitors(card: OpportunityCard) -> str:
         # 输入。此前它只进判定提示词与出网载荷，本地产物里反而看不到 —— 用户只能
         # 逐个点开链接自行判断。gap_notes（LLM 归纳的"它没覆盖什么"）两个渠道目前
         # 都恒为空，留着是为了让将来接上的渠道不必改渲染。
-        shown = finding.description
-        if len(shown) > _COMPETITOR_DESC_CHARS:
-            shown = shown[: _COMPETITOR_DESC_CHARS - 1] + "…"
-        desc = f'<p class="comp-gap">{_esc(shown)}</p>' if shown else ""
+        #
+        # 一次挡住三件"其实等于没有"的输入：``None``（裸取长度会抛 ``TypeError``）、
+        # 非字符串（``.strip()`` 会抛 ``AttributeError``）、纯空白串（会渲染出一个
+        # **空段落** —— 版面上就是"这里本来该有条结论"）。``description`` 声明成
+        # ``str``，但那是调用方的类型约定、不是运行时保证：渲染层对外的承诺是
+        # "缺什么少显示什么、绝不抛异常"（见 ``render_html`` 的 Note）。Markdown 的
+        # 同名分支用同一条口径 —— 同一个字段在两种产物上不能一个崩一个不崩、
+        # 一个印空段落一个不印。
+        #
+        # 紧邻的 ``gap_notes`` **没有**跟着走这套判据，它仍是裸真值判断：两个渠道
+        # 目前都恒不产出它（见 ``research.github._to_finding`` / ``appstore``），
+        # 今天的任何真实输入都碰不到那条分支。将来真接上内容时，要照上面这一处
+        # 把同样的三种守卫补齐 —— 只搬真值判断会把这两个坑原样带过去。
+        desc = ""
+        raw = finding.description if isinstance(finding.description, str) else ""
+        text = raw.strip()
+        if text:
+            if len(text) > _COMPETITOR_DESC_CHARS:
+                text = text[: _COMPETITOR_DESC_CHARS - 1] + "…"
+            desc = f'<p class="comp-gap">{_esc(text)}</p>'
         gap = f'<p class="comp-gap">{_esc(finding.gap_notes)}</p>' if finding.gap_notes else ""
         rows.append(
             f'<li><div class="comp-name">{name}'
