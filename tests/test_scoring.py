@@ -892,6 +892,23 @@ class TestBuildCards:
         assert "检索不到 / 没有可用的检索词 1 个" in message
         assert "调用失败 1 个" in message
 
+    def test_unresolved_warning_prints_the_actual_gap(self):
+        """★ 运行提示里印的中性值必须**等于**那张卡实际取到的空白度。
+
+        同 ``tests/test_render.py::TestPrintedNeutralValueIsTheRealOne``：独立验证发现
+        把 ``_unresolved_warning`` 里的 ``{NEUTRAL}`` 改成字面量 ``1.0``，全量 1259 条
+        测试**一条都不红**，而运行提示会印出「按中性值 1.0 计」—— ``1.0`` 正是 M1 那个
+        "查证过确实没有竞品"的最强正面信号，也正是 M2 存在的全部理由。
+
+        不断言"必须等于 0.5"（那是把常量抄一遍，改常量时测试跟着改、永远不红），
+        而是断言**印出来的数 == 那张卡实际的空白度**。
+        """
+        cards, warnings = build_cards([cluster(id_="a", size=200)], outcomes={})
+        gap = cards[0].score_breakdown["competitor_gap"]
+        assert gap == NEUTRAL, "前提：这张卡确实取中性值"
+        message = next((warning for warning in warnings if "没有得出结论" in warning), "")
+        assert f"按中性值 {gap} 计" in message
+
     def test_thin_corpus_is_surfaced_as_a_warning(self):
         """★ 薄语料必须说出来。
 

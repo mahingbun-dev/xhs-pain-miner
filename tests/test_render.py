@@ -31,6 +31,7 @@ from xhs_pain_miner.models import (
 )
 from xhs_pain_miner.render.html import DEFAULT_TITLE, render_html, write_html
 from xhs_pain_miner.render.markdown import render_markdown
+from xhs_pain_miner.scoring.opportunity import NEUTRAL
 
 XSS_SCRIPT = "<script>alert(1)</script>"
 XSS_IMG = '<img src=x onerror="alert(1)">'
@@ -849,6 +850,55 @@ class TestPartialResearchReachesTheCard:
         )
         assert "结果可能不完整" not in render_markdown(make_result(cards=[card]))
         assert "结果可能不完整" not in render_html(make_result(cards=[card]))
+
+
+class TestPrintedNeutralValueIsTheRealOne:
+    """★ 产物里印的中性值必须**等于**那张卡实际取到的空白度。
+
+    独立验证发现这一格此前无人守：把 Markdown 的 ``_esc(NEUTRAL)`` 改成字面量
+    ``1.0``，全量 1259 条测试**一条都不红**，而产物会印出
+
+        （空白度按中性值 1.0 计）
+
+    —— ``1.0`` 正是 M1 那个「查证过确实没有竞品」的最强正面信号，也正是 M2 存在的
+    全部理由。三处文案的**用词**有守卫（``test_no_branch_claims_how_the_gap_is_scored``
+    查"有没有出现分数词"），**数值**没有。
+
+    这里不断言"必须等于 0.5" —— 那是把常量抄一遍，改常量时测试跟着改、永远不红。
+    断言的是**印出来的数 == 那张卡实际的空白度**，两侧任何一个走偏都会红。
+    """
+
+    def _unresearched_card(self) -> OpportunityCard:
+        """一张"没查成"的卡片。
+
+        ``score_breakdown`` 必须**显式**给：``make_card`` 的默认值是
+        ``{"competitor_gap": 1.0}``，而它与 ``research_status="unsearchable"`` 不自洽
+        —— 那正是 ``make_card`` docstring 警告过的"三个字段必须说同一件事"。
+        用默认值造出来的卡片会去断言"印出来的 1.0 == 实际的 1.0"，那条断言恒真、
+        守不住这里要守的东西（前提校验那一条就是为了拦住这种造法）。
+        """
+        breakdown = {
+            "pain_strength": 0.92,
+            "mention_volume": 0.71,
+            "growth_trend": 0.55,
+            "competitor_gap": NEUTRAL,
+            "feasibility": 0.75,
+        }
+        return make_card(competitors=[], research_status="unsearchable", score_breakdown=breakdown)
+
+    def test_gap_really_is_neutral_for_this_card(self):
+        """前提校验：下面两条断言要有意义，这张卡得确实取中性值。"""
+        assert self._unresearched_card().score_breakdown["competitor_gap"] == NEUTRAL
+
+    def test_html_prints_the_actual_gap(self):
+        card = self._unresearched_card()
+        gap = card.score_breakdown["competitor_gap"]
+        assert f"按中性值 {gap} 计" in render_html(make_result(cards=[card]))
+
+    def test_markdown_prints_the_actual_gap(self):
+        card = self._unresearched_card()
+        gap = card.score_breakdown["competitor_gap"]
+        assert f"按中性值 {gap} 计" in render_markdown(make_result(cards=[card]))
 
 
 class TestBothRenderersAgreeOnResearchNotes:

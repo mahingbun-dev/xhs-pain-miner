@@ -360,6 +360,33 @@ class TestWarningFor:
         assert "「有内容但不相关」" in text and "没有相关的实现" in text
         assert "「被限流的那条」" in text and "没有查成" in text
 
+    def test_each_query_is_named_in_exactly_one_clause(self):
+        """★★ **分区性**：同一个检索词只能出现在**一个**子句里。
+
+        上一条只断言"每种成因**出现**了"（存在性）。独立验证发现这不够：把
+        ``unrelated`` 的判据从 ``hits > 0`` 改成 ``hits >= 0``，全量 1259 条测试
+        **一条都不红**，而产物会写成
+
+            检索词（「毫无结果的说法」）在该渠道**没有返回任何结果**；
+            检索词（「毫无结果的说法」）在该渠道**返回过内容，但没有相关的实现**
+
+        —— 同一个词自相矛盾地落进两个子句。存在性断言对这类"分组键重叠"完全无感。
+
+        变异提示：把 ``unrelated`` 的 ``hits > 0`` 改成 ``hits >= 0``，这条必须变红。
+        """
+        text = warning_for(
+            "unsearchable",
+            [
+                empty_trace("毫无结果的说法"),
+                QueryTrace(query="有内容但不相关", channel="github", hits=7, kept=0),
+                failed_trace("被限流的那条"),
+            ],
+            subject="x",
+        )
+        assert text is not None
+        for name in ("毫无结果的说法", "有内容但不相关", "被限流的那条"):
+            assert text.count(f"「{name}」") == 1, f"「{name}」出现在多个子句里：{text}"
+
     def test_unsearchable_is_reachable_from_classify_status_in_the_unrelated_case(self):
         """★ 上面那个缺陷场景必须**经由 build_outcome 可达** —— 不是只存在于手工调用里。
 
