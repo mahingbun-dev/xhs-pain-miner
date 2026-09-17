@@ -279,13 +279,21 @@ def warning_for(
        空白度可能**不是**中性值（另一个渠道查到了竞品）—— 于是"其「竞品空白度」按
        中性值计"这句话在渠道层说，合并后就会变成假的，产物自相矛盾。
 
-       「分数怎么算」只能由唯一知道最终结论的那一层说，也就是
-       :func:`~xhs_pain_miner.scoring.opportunity._unresolved_warning` —— 它读的是
-       **卡片**，卡片上的 ``research_status`` 已经是合并之后的值。所以本函数里不再
-       出现任何关于空白度取值的断言，改由那里统一说（且只在确实为中性时才说）。
+       所以本函数里不再出现任何关于空白度取值的断言。「分数怎么算」这件事改由
+       **知道最终结论的那几层**说，它们都读的是**合并之后**的卡片：
+
+       * :func:`~xhs_pain_miner.scoring.opportunity._unresolved_warning`（运行提示）；
+       * 渲染层的卡片结论（``render/html.py`` 与 ``render/markdown.py`` 的
+         "「竞品空白度」按中性值 0.5 计"）；
+       * 还有 ``pain_miner`` 里几条"压根没查"的分支（调研关闭 / 超出
+         ``RESEARCH_MAX_CLUSTERS``）—— 它们本来就知道结果是中性，**不**属违约。
 
        这条与本模块自己的立论同源：**主张只能由知道答案的那一层发出**。
        渠道层不知道合并结果，轨迹层不知道评分口径 —— 都不该替结论层下判断。
+
+       （早先这里写过"只能由唯一知道最终结论的那一层说，也就是 `_unresolved_warning`"
+       —— 那句是**绝对的、且为假**：上面第三类也在说、且说对了。绝对句本身就是这类
+       缺陷的一种，同源理由见 ``docs/architecture.md`` §4.5。）
     """
     if status == "ok":
         # 找到了竞品，但不是每条检索词都查成 → 这份列表**可能不完整**。
@@ -317,7 +325,7 @@ def warning_for(
 
     if status == "unsearchable":
         if not queries:
-            return f"簇「{subject}」没有可用的检索词，未做竞品调研—— 没查过不等于没有竞品。"
+            return f"簇「{subject}」没有可用的检索词，未做竞品调研 —— 没查过不等于没有竞品。"
         return _unsearchable_warning(queries, subject=subject)
 
     # no_competitor
@@ -333,39 +341,51 @@ def warning_for(
 def _unsearchable_warning(queries: Sequence[QueryTrace], *, subject: str) -> str:
     """拼出"检索不到，无法判断"的警告 —— 按**成因**分开说。
 
-    ``unsearchable`` 在这里有两条完全不同的成因，混成一句会失实：
+    ``unsearchable`` 有**三种**成因，混成一句必然失实。判据必须落在**平台实际返回了
+    什么**上，而不是"这次调用有没有报错"：
 
-    * 查询**成功、但平台返回 0 条** —— 是"这个说法在该渠道检索不到"。
-      下一步是换个更贴近"用户会去找什么工具"的说法再搜。
-    * 查询**没查成**（限流 / 网络）—— 是"这次没跑完"。下一步是等额度或网络恢复。
+    * **成功、但平台返回 0 条** —— "这个说法在该渠道检索不到"。下一步是换个更贴近
+      "用户会去找什么工具"的说法再搜。
+    * **成功、平台返回过内容但都不相关** —— 平台里有东西，只是没有在解决这个痛点的。
+      这时再说"没有返回任何结果"就是假话：**同一份产物里的检索轨迹正写着**
+      "命中 N 条 · 保留 0 条"，两句并排出现时用户看到的是打架的话。
+    * **没查成**（限流 / 网络）—— "这次没跑完"。下一步是等额度或网络恢复。
 
-    两者对用户的下一步动作不同，所以必须分开说。这条区分是**补的**：该分支写于
-    ``unsearchable`` 只有前者一种成因的年代，后来 :func:`classify_status` 把"部分失败"
-    也路由到了 ``unsearchable``，文案没跟上 —— 实测（独立验证复现）一条被限流的检索词
-    会被说成"在该渠道没有返回任何结果"，而它实际上是**调用失败**。这与
-    :func:`~xhs_pain_miner.scoring.opportunity._unresolved_warning` 主张"两类要分开报数"
-    是同一条道理，只是这里同样漏了。
+    三者对用户的下一步动作不同，所以必须分开说。
+
+    前两类最初被合并成同一句：判据写的是 ``trace.succeeded``，于是"返回过 5 条但都
+    不相关"也被说成"没有返回任何结果"。这是**独立验证**用穷举口径对照抓出来的
+    （``[成功·有命中, 失败]`` 这一格当时没有任何测试覆盖），本函数据此改成按
+    ``hits`` 再分一次。
+
+    .. note::
+       ``missed`` 单独出现（全部查询都失败）**不可达** —— 那种组合
+       :func:`classify_status` 会判 ``failed``。这里仍然处理它，是为了本函数被
+       **直接调用**时也给出自洽的话（``warning_for`` 是公开导出的，测试就那样调它）。
     """
-    returned_nothing = [trace for trace in queries if trace.succeeded]
+    zero_hits = [trace for trace in queries if trace.succeeded and trace.hits == 0]
+    unrelated = [trace for trace in queries if trace.succeeded and trace.hits > 0]
     missed = [trace for trace in queries if not trace.succeeded]
 
     clauses: list[str] = []
     tips: list[str] = []
-    if returned_nothing:
-        names = "、".join(
-            f"「{trace.query}」" for trace in returned_nothing[:_MAX_QUERIES_IN_WARNING]
-        )
+    if zero_hits:
+        names = "、".join(f"「{trace.query}」" for trace in zero_hits[:_MAX_QUERIES_IN_WARNING])
         clauses.append(f"检索词（{names}）在该渠道**没有返回任何结果**")
         tips.append(
             "检索不到 ≠ 不存在 —— 换一个更贴近「用户会去找什么工具」的说法再搜，往往就能搜到"
         )
+    if unrelated:
+        names = "、".join(f"「{trace.query}」" for trace in unrelated[:_MAX_QUERIES_IN_WARNING])
+        clauses.append(f"检索词（{names}）在该渠道**返回过内容，但没有相关的实现**")
     if missed:
         names = "、".join(f"「{trace.query}」" for trace in missed[:_MAX_QUERIES_IN_WARNING])
         clauses.append(f"检索词（{names}）这次**没有查成**（原因见检索轨迹）")
         tips.append("没查成的那几条是限流或网络导致的，恢复后重跑即可")
 
     detail = "；".join(clauses)
-    return f"簇「{subject}」的{detail}，无法据此判断有没有竞品。" + "；".join(tips) + "。"
+    tail = "；".join(tips)
+    return f"簇「{subject}」的{detail}，无法据此判断有没有竞品。" + (f"{tail}。" if tail else "")
 
 
 __all__ = [

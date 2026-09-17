@@ -318,6 +318,63 @@ class TestWarningFor:
         assert "没有返回任何结果" in text
         assert "没有查成" not in text
 
+    def test_a_query_that_returned_unrelated_hits_is_not_called_empty(self):
+        """★★ "平台返回过内容但都不相关"**不许**被说成"没有返回任何结果"。
+
+        这条是**独立验证抓出来的阻塞缺陷**：分组键当初写的是 ``trace.succeeded``，而
+        "成功"包含"返回了 5 条、只是都不相关"。于是产物里同时出现两句互斥的话：
+
+            簇「防晒搓泥」的检索词（「防晒搓泥」）在该渠道**没有返回任何结果**…
+            `github` 「防晒搓泥」 命中 5 条 · 保留 0 条      ← 同一份产物里的轨迹行
+
+        而 ``[成功·有命中, 失败]`` 这一格当时**没有任何测试覆盖** —— 已有的两条只走
+        "成功·0 命中"与"失败"，正好绕开了它。教训：分组键要落在**平台实际返回了什么**
+        上，不是"这次调用报没报错"。
+
+        变异提示：把 ``_unsearchable_warning`` 的分组键改回只看 ``trace.succeeded``，
+        这条必须变红。
+        """
+        unrelated = QueryTrace(query="防晒搓泥", channel="github", hits=5, kept=0)
+        text = warning_for(
+            "unsearchable", [unrelated, failed_trace("搓泥 工具")], subject="防晒搓泥"
+        )
+        assert text is not None
+        assert "没有返回任何结果" not in text, "它明明返回了 5 条"
+        assert "返回过内容" in text
+        assert "没有相关的实现" in text
+        assert "没有查成" in text
+
+    def test_unsearchable_keeps_the_three_causes_apart(self):
+        """三种成因同时出现时，三句话都要有、且各自附上对应的下一步动作。"""
+        text = warning_for(
+            "unsearchable",
+            [
+                empty_trace("毫无结果的说法"),
+                QueryTrace(query="有内容但不相关", channel="github", hits=7, kept=0),
+                failed_trace("被限流的那条"),
+            ],
+            subject="x",
+        )
+        assert text is not None
+        assert "「毫无结果的说法」" in text and "没有返回任何结果" in text
+        assert "「有内容但不相关」" in text and "没有相关的实现" in text
+        assert "「被限流的那条」" in text and "没有查成" in text
+
+    def test_unsearchable_is_reachable_from_classify_status_in_the_unrelated_case(self):
+        """★ 上面那个缺陷场景必须**经由 build_outcome 可达** —— 不是只存在于手工调用里。
+
+        ``warning_for`` 是公开导出的、测试可以直接调；但如果这条组合
+        ``classify_status`` 根本判不出 ``unsearchable``，那上面的守卫就是空中楼阁。
+        这里走一遍真实入口。
+        """
+        unrelated = QueryTrace(query="防晒搓泥", channel="github", hits=5, kept=0)
+        missed = QueryTrace(query="搓泥 工具", channel="github", error="GitHub 被限流（HTTP 403）")
+        outcome = build_outcome([unrelated, missed], [], subject="防晒搓泥")
+        assert outcome.status == "unsearchable"
+        assert outcome.warning is not None
+        assert "没有返回任何结果" not in outcome.warning
+        assert "返回过内容" in outcome.warning
+
     def test_no_branch_claims_how_the_gap_is_scored(self):
         """★★ **反向守卫**：渠道层文案里不得出现任何关于分数的主张。
 

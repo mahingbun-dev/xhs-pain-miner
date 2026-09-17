@@ -17,6 +17,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 from xhs_pain_miner.models import (
     CompetitorFinding,
     Evidence,
@@ -847,6 +849,69 @@ class TestPartialResearchReachesTheCard:
         )
         assert "结果可能不完整" not in render_markdown(make_result(cards=[card]))
         assert "结果可能不完整" not in render_html(make_result(cards=[card]))
+
+
+class TestBothRenderersAgreeOnResearchNotes:
+    """★ 两份产物对**同一张卡片**必须同判 —— 这条要求本身此前没有任何守卫。
+
+    独立验证发现：把 Markdown 的判据窄化成 ``research_incomplete and status == "ok"``
+    之后，同一张卡片 HTML 说"结果可能不完整"、Markdown 不说，**而全量测试一条都不红**；
+    把派生属性换成内联的等价判据同样全绿。原因是两份测试只各自钉了自己在**同一个输入**
+    上的行为，没有任何断言"两者必须同判"。
+
+    这与本轮修复的形状一致：判据已经统一到 ``OpportunityCard.research_incomplete``，
+    但"统一"这件事本身也需要一条测试守着，否则下次有人只改一边，一样不会红。
+    """
+
+    COMPETITOR = [
+        CompetitorFinding(
+            source="github",
+            name="acme/tool",
+            url="https://e.test/tool",
+            stars=120,
+            last_active=date.today(),
+        )
+    ]
+    OK = QueryTrace(query="小红书 收藏 备份", channel="github", hits=3, kept=1)
+    MISSED = QueryTrace(query="笔记 导出 工具", channel="github", error="HTTP 403 限流")
+    ZERO = QueryTrace(query="防晒搓泥", channel="github", hits=0, kept=0)
+
+    VARIANTS = [
+        ("全成功", "ok", (OK,), False),
+        ("一条没查成", "ok", (OK, MISSED), False),
+        ("判定失败", "ok", (OK,), True),
+        ("判定失败 + 一条没查成", "ok", (OK, MISSED), True),
+        ("未定论·有轨迹", "unsearchable", (ZERO,), False),
+        ("未定论·无轨迹", "unsearchable", (), False),
+        ("查到竞品·未定论（手工构造）", "unsearchable", (OK,), False),
+        ("查证过没有", "no_competitor", (OK,), False),
+    ]
+
+    @pytest.mark.parametrize(
+        ("label", "status", "queries", "judgement_failed"),
+        VARIANTS,
+        ids=[variant[0] for variant in VARIANTS],
+    )
+    def test_both_products_make_the_same_call(
+        self,
+        label: str,
+        status: ResearchStatus,
+        queries: tuple[QueryTrace, ...],
+        judgement_failed: bool,
+    ):
+        card = make_card(
+            competitors=self.COMPETITOR,
+            research_status=status,
+            research_queries=queries,
+            research_judgement_failed=judgement_failed,
+        )
+        html = render_html(make_result(cards=[card]))
+        markdown = render_markdown(make_result(cards=[card]))
+        for marker in ("结果可能不完整", "未经相关性判定"):
+            assert (marker in html) == (marker in markdown), (
+                f"「{label}」两份产物对「{marker}」不同判：HTML={marker in html}、"
+                f"Markdown={marker in markdown}"
+            )
 
 
 class TestCompetitorDescriptions:
