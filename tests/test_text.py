@@ -46,6 +46,40 @@ class TestInvisibleCharsList:
     def test_list_has_no_duplicates(self):
         assert len(set(INVISIBLE_CHARS)) == len(INVISIBLE_CHARS)
 
+    def test_the_list_still_covers_every_family(self):
+        """名单的**成员**必须有人守 —— 否则它会在无人察觉时慢慢变空。
+
+        本文件里所有 ``@pytest.mark.parametrize("char", INVISIBLE_CHARS)`` 都是
+        **自适应**的：名单少一个字符，参数就少一组，那些测试**静默变弱**而不是变红。
+        实测过：把 23 个字符逐个删掉、每次跑整套，只有 6 个会被现有测试偶然
+        抓到（碰巧有别的测试硬编码了它们），另外 **17 个删了全套测试依然全绿**。
+
+        所以这里按"族"逐个钉住 —— 少任何一个族都会红。这也正是
+        ``tests/test_render.py`` 给 ``MISSING`` 加内容守卫的同一件事。
+        """
+        codes = {ord(c) for c in INVISIBLE_CHARS}
+        assert 0x00AD in codes, "软连字符被删了"
+        assert codes >= {0x200B, 0x200C, 0x200D}, "零宽字符族不完整"
+        assert codes >= {0x200E, 0x200F}, "LRM / RLM 被删了"
+        assert codes >= {0x202A, 0x202B, 0x202C, 0x202D, 0x202E}, "双向文本嵌入与覆盖不完整"
+        assert codes >= {0x2060, 0x2061, 0x2062, 0x2063, 0x2064}, "不可见运算符不完整"
+        assert codes >= {0x2066, 0x2067, 0x2068, 0x2069}, "双向隔离符不完整"
+        assert codes >= {0x180E, 0x3164, 0xFEFF}, "蒙古文分隔符 / 谚文填充符 / BOM 被删了"
+        assert len(INVISIBLE_CHARS) == 23, "名单长度变了 —— 请连同这条断言一起更新"
+
+    def test_the_long_tail_stays_out_on_purpose(self):
+        """已知漏网的那一族必须**仍然**留在名单外 —— 它们是取舍，不是遗漏。
+
+        这批码位漏网的理由写在 ``text.py`` 的名单上方：名单与
+        ``normalize_keyword`` 共用，而删除侧删掉 U+FE0F 会毁掉 ``❤️`` 这类 emoji
+        序列、删掉 U+034F 会改掉字形组合。这条断言的作用是**让下一个想加它们的人
+        先撞上这段理由**，而不是禁掉改进 —— 如果哪天把名单拆成"判断用"与"删除用"
+        两份，``INVISIBLE_CHARS`` 仍该是窄的那一份，这条也就仍然成立。
+        """
+        codes = {ord(c) for c in INVISIBLE_CHARS}
+        assert 0xFE0F not in codes, "U+FE0F 进了删除表 —— ❤️ 会被毁掉"
+        assert 0x034F not in codes, "U+034F 进了删除表 —— 字形组合会被改掉"
+
 
 class TestTextOrEmpty:
     """判"有没有内容"：返回空串就是没有。"""
@@ -120,11 +154,20 @@ class TestOutputKeepsTheOriginalText:
 
 
 class TestBothConsumersAgree:
-    """判据只有一份 —— 这条测试守的就是"别再抄一份"。"""
+    """判据只有一份 —— 这条测试守的就是"别再抄一份"。
+
+    要说清楚它守的是**哪一份**：这里断言的是"共用函数与 ``normalize_keyword``
+    对名单的判断一致"，它**不经过渲染器**。有人给 ``normalize_keyword`` 换一份
+    残缺名单时，是这条红。
+
+    **渲染器那一侧**由 ``tests/test_render.py::TestCompetitorDescriptionMissing``
+    覆盖（``MISSING`` 里就有不可见字符族）—— 渲染器自己抄一份判据时，红的是那些，
+    不是这些。两边都要有，缺一边就有一半的"各写各的"能溜过去。
+    """
 
     @pytest.mark.parametrize("char", INVISIBLE_CHARS)
     def test_both_consumers_agree_the_char_is_invisible(self, char: str):
-        assert text_or_empty(char) == ""  # 渲染层：算"没有"，不渲染
+        assert text_or_empty(char) == ""  # 共用判据：算"没有"
         with pytest.raises(ValueError, match="不能为空"):  # 关键词层：算"没有"，拒收
             normalize_keyword(char)
 

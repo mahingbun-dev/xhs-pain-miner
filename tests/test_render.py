@@ -992,6 +992,45 @@ class TestCompetitorDescriptionMissing:
                 f"description={missing!r} 的 Markdown 产物不同"
             )
 
+    def test_invisible_chars_inside_a_description_survive_rendering(self):
+        """渲染层只判"有没有内容"，**绝不改写正文** —— 正文里的不可见字符必须原样出来。
+
+        这是本组最容易漏的一条：上面几条只钉 ``text_or_empty`` 那一层，而
+        "渲染器把清洗后的文本印出去"（顺手把 ZWJ 删掉）能让它们**全部保持绿色**。
+        实测过：把两个渲染器都改成渲染清洗后的文本，``test_render.py`` 88 条全绿。
+
+        代价是真实的：``👨\u200d👩\u200d👧`` 里的 ZWJ 被删掉，一个家庭 emoji 会散成
+        三个人；双向控制符被删掉，阿拉伯语 / 希伯来语的显示顺序会变。
+        """
+        zwj = "\u200d"
+        rlm = "\u200f"
+        cases = [
+            (f"\U0001f468{zwj}\U0001f469{zwj}\U0001f467 家庭", zwj, 2),
+            (f"{rlm}שלום{rlm}", rlm, 2),
+        ]
+        for description, marker, expected in cases:
+
+            def card(text: str = description) -> OpportunityCard:
+                return make_card(
+                    competitors=[
+                        CompetitorFinding(
+                            source="appstore",
+                            name="x",
+                            url="https://e.test/x",
+                            description=text,
+                        )
+                    ],
+                    research_status="ok",
+                )
+
+            for product in (
+                render_html(make_result(cards=[card()])),
+                render_markdown(make_result(cards=[card()])),
+            ):
+                assert product.count(marker) >= expected, (
+                    f"渲染层丢掉了正文里的 {marker!r} —— 正文被改写了"
+                )
+
     def test_none_description_does_not_crash_html(self):
         """``None`` 也必须不崩。
 
