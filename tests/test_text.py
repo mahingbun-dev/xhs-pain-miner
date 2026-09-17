@@ -72,13 +72,30 @@ class TestInvisibleCharsList:
 
         这批码位漏网的理由写在 ``text.py`` 的名单上方：名单与
         ``normalize_keyword`` 共用，而删除侧删掉 U+FE0F 会毁掉 ``❤️`` 这类 emoji
-        序列、删掉 U+034F 会改掉字形组合。这条断言的作用是**让下一个想加它们的人
-        先撞上这段理由**，而不是禁掉改进 —— 如果哪天把名单拆成"判断用"与"删除用"
-        两份，``INVISIBLE_CHARS`` 仍该是窄的那一份，这条也就仍然成立。
+        序列、删掉 U+034F 会改掉字形组合。
+
+        断言的是**整块**而不是两个代表字符：只钉 U+FE0F / U+034F 时，把
+        U+2800（盲文空白）之类的码位加进名单、再顺手把上面那条 ``len == 23``
+        改成 24，整套测试**一条都不会红** —— 而那恰恰会让 ``normalize_keyword``
+        开始删它们，正是这里要防的事。这条的作用是**让下一个想加它们的人先撞上
+        理由**，不是禁掉改进：如果哪天把名单拆成"判断用"与"删除用"两份，
+        ``INVISIBLE_CHARS`` 仍该是窄的那一份，这条也就仍然成立。
         """
-        codes = {ord(c) for c in INVISIBLE_CHARS}
-        assert 0xFE0F not in codes, "U+FE0F 进了删除表 —— ❤️ 会被毁掉"
-        assert 0x034F not in codes, "U+034F 进了删除表 —— 字形组合会被改掉"
+        long_tail = {
+            *range(0xFE00, 0xFE10),  # 变体选择符 VS1–VS16
+            *range(0xE0100, 0xE01F0),  # 补充变体选择符（整块，不止 E0100）
+            0x034F,  # 组合字形连接符
+            0x115F,
+            0x1160,
+            0xFFA0,  # 谚文填充符（名单里只收了 U+3164）
+            0x0600,
+            0x061C,
+            0x070F,  # 阿拉伯 / 叙利亚格式符
+            *range(0x206A, 0x2070),  # 已废弃的格式符
+            0x2800,  # 盲文空白
+        }
+        leaked = sorted(hex(c) for c in long_tail & {ord(c) for c in INVISIBLE_CHARS})
+        assert not leaked, f"这些长尾码位进了删除表（理由见 text.py 的名单上方）：{leaked}"
 
 
 class TestTextOrEmpty:
