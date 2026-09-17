@@ -819,10 +819,16 @@ def build_cards(
     # 「提及量 0.65」时最自然的解读是"算错了"。这条提示把"证据量不足"这个**事实**
     # 摆出来，而不是让它变成一个沉默的低分。
     if selected and max_size < MENTION_VOLUME_REFERENCE:
+        # 印出**实际**的因子值，而不是断言一句"头名不是满分"。
+        #
+        # 后者在边界上是**噪音**：49 次提及的头名 ``mv = 0.995``，"不是满分"字面为真，
+        # 可用户在报告里看到的就是满分 —— 提示看起来像在抱怨一件看不见的事。给出数字，
+        # 用户能自己核对，提示就从"抱怨"变成了"信息"。（PR #2 记的"已知残留 1"。）
+        best = max(card.score_breakdown["mention_volume"] for card in cards)
         warnings.append(
             f"本次语料规模偏小：最大的痛点也只有 {max_size} 次提及（证据充分线为 "
             f"{MENTION_VOLUME_REFERENCE:.0f} 次），「提及量」因子已按绝对证据量打折 "
-            "—— 头名不是满分，这不代表方向不好，只代表样本还不够多"
+            f"—— 本次最高 {best:.2f}。这不代表方向不好，只代表样本还不够多"
         )
     if all(not cluster.feasibility.strip() for cluster in selected) and selected:
         warnings.append(

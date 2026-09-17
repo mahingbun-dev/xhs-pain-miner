@@ -958,14 +958,35 @@ class TestBuildCards:
         中间那句安抚（「这不代表方向不好」）却不报。整体比对才能既挡住误改、也挡住
         漏改。**有意改文案时请连带更新这里**（文案里的 50 与
         :data:`MENTION_VOLUME_REFERENCE` 同源）。
+
+        末尾那个 ``0.65`` 是**实际算出来的因子值**，不是写死的字面量 —— 它由
+        :func:`mention_volume` 决定，所以这条测试同时也钉住了"提示里的数字与因子
+        一致"。早先这里写的是「头名不是满分」：句子在边界上（49 次 → 0.995）字面
+        为真却像噪音，用户在报告里看到的就是满分。改成印数字后，提示变成可核对的
+        信息（PR #2 记的"已知残留 1"）。
         """
         _, warnings = build_cards([cluster(id_="a", size=12)], outcomes={})
         message = next((w for w in warnings if "语料规模偏小" in w), "")
         assert message == (
             "本次语料规模偏小：最大的痛点也只有 12 次提及（证据充分线为 50 次），"
-            "「提及量」因子已按绝对证据量打折 —— 头名不是满分，"
+            "「提及量」因子已按绝对证据量打折 —— 本次最高 0.65。"
             "这不代表方向不好，只代表样本还不够多"
         )
+
+    def test_thin_corpus_warning_prints_the_number_instead_of_asserting(self):
+        """★ 提示里印的必须是**算出来的**因子值 —— 49 与 50 的边界上看得出差别。
+
+        这是"文案噪音"那条残留的正面守卫：旧文案在 49 次时说的是"头名不是满分"，
+        而头名的因子是 0.995 —— 字面为真、观感是满分。现在印 0.99，用户看一眼就
+        知道差在哪；50 次时不提示，因为那时确实是满分（见下一条边界测试）。
+
+        变异提示：把 ``best`` 换成写死的 ``1.00``，这条会红。
+        """
+        cards, warnings = build_cards([cluster(id_="a", size=49)], outcomes={})
+        assert cards[0].score_breakdown["mention_volume"] == pytest.approx(0.995, abs=1e-3)
+        message = next((w for w in warnings if "语料规模偏小" in w), "")
+        assert "本次最高 0.99" in message
+        assert "头名不是满分" not in message
 
     def test_thin_corpus_warning_boundary_is_at_the_reference_line(self):
         """★ 判据是 ``<`` 而非 ``<=``：恰好 50 次提及就是证据充分，不该再说"规模偏小"。
