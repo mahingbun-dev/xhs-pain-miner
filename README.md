@@ -43,11 +43,14 @@
 
 ## ⚠️ 当前状态
 
-**M0（骨架）与 M1（核心分析链路）已完成 🔶。**
+**M0 已完成 ✅。M1 / M2 / M3 的代码都已合并进 `main`，但三者都停在 🔶。**
 
-🔶 = 代码已落地、端到端跑通，但验收门②（人工盲评 20 张卡片「有用率 ≥ 60%」）与
-门④（VLM 成本实测报告）尚未闭合 —— 前者需要目标用户本人判断，后者需要真实 API Key
-才能产出数字。在两者完成前不标 ✅。
+🔶 = **代码已落地，验收门尚未闭合**。代码合入与验收通过是两件事 —— 这张表与下面的
+路线图都不把前者当成后者，所以在验收完成前不标 ✅。
+
+还差的门：M1 的人工盲评（**需目标用户本人**）与两项真实 Key 实测 · M2 的竞品调研人工抽检
+（**需你本人**）· M3 的真实后端跑通（**需你本机已登录的采集服务**）与代码审计。
+**逐步做法与判定标准**见 [docs/acceptance-checklist.md](docs/acceptance-checklist.md)。
 
 | 能力 | 状态 |
 |---|---|
@@ -57,7 +60,7 @@
 | 采集后端插件协议 | ✅ 可用 |
 | `mine` 完整分析（清洗 → LLM 归纳痛点 + 向量分类 → 竞品调研 → 机会分 → 报告） | 🔶 M1 已实现 |
 | VLM 图片分析（`mine --deep`）+ 成本控制 | 🔶 M1 已实现 |
-| MCP 采集后端（xiaohongshu-mcp 适配） | 🔶 M3 已实现 |
+| MCP 采集后端（xiaohongshu-mcp 适配） | 🔶 M3 代码已合并 |
 | Claude Code / Codex Skill | ⏳ M4 |
 
 README 中的功能描述与路线图严格对应上表，不提前宣称未实现的能力。
@@ -82,7 +85,11 @@ xhs-pain-miner doctor
 ```
 
 `doctor` 会检查 Python 版本、依赖、LLM/VLM 配置、采集后端与路径权限，
-并给出可直接复制执行的修复建议。它**不发起任何网络请求**。
+并给出可直接复制执行的修复建议。它**不调用 LLM/VLM、不写任何文件**。
+
+> 唯一会发请求的是采集后端那一项 —— 它会问后端"当前可用吗"。`mcp` 后端因此会去连
+> 你本机的 xiaohongshu-mcp（账号掉线时会直接告诉你，省得跑完采集才发现）；
+> `plugin` 后端问什么由插件自己决定。
 
 ### 用内置样例数据跑一遍
 
@@ -194,7 +201,7 @@ xhs-pain-miner mine -k 防晒霜 -n 200
 |---|---|---|
 | `fixture` | 内置脱敏样例数据，用于 CI / Demo / 离线验证 | ✅ 默认 |
 | `plugin` | 加载**你本机自备**的采集器 | ✅ |
-| `mcp` | 适配 [xiaohongshu-mcp](https://github.com/xpzouying/xiaohongshu-mcp)（Apache-2.0）—— 适配器在仓库内，采集服务由你本机运行 | 🔶 M3 已实现 |
+| `mcp` | 适配 [xiaohongshu-mcp](https://github.com/xpzouying/xiaohongshu-mcp)（Apache-2.0）—— 适配器在仓库内，采集服务由你本机运行 | 🔶 M3 代码已合并 |
 
 > `mcp` 是上面那条规则的**有边界的例外**：xiaohongshu-mcp 是 Apache-2.0，可商用、可再分发。
 > 即便如此，仓库里也没有一行采集代码 —— 采集由你本机运行的服务完成。
@@ -265,7 +272,7 @@ xhs-pain-miner collect -k 防晒霜 --backend plugin
 > 且 LLM 调用从「每个簇一次」（实测 171 次）降到「1 次归纳 + 每个痛点 1 次标注」（10 个痛点 = 11 次）。
 > 复现：`.venv/bin/python tools/eval_clustering.py`；详见 [docs/architecture.md](docs/architecture.md)。
 
-### M2 · 竞品调研补全 ⏳
+### M2 · 竞品调研补全 🔶
 - [x] 解法词检索（痛点名 → "用户会敲进搜索框"的词，按渠道分语言）
 - [x] App Store 渠道（iTunes Search API，免鉴权）
 - [x] 结论契约 + 相关性判定 + 多渠道路由（四种结论，含检索轨迹）
