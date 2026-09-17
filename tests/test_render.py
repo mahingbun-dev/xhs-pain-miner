@@ -889,14 +889,24 @@ class TestCompetitorDescriptionMissing:
     报告不该把它们说成同一件。空段落同理：一个空的 ``comp-gap`` / 空的引用块行，
     在版面上就是"这里本来该有条结论"。缺什么少什么，是渲染层对外的承诺。
 
-    "缺"有六种写法，**六条都要撞**：空串、``None``、只有空白的串、只有换行的串、
-    以及非字符串（列表 / 字典）。上游 ``_describe`` 目前会把后五种都压成空串，
+    "缺"有八种写法，**每一条都要撞**：空串、``None``、只有空白的串、只有换行的串、
+    非字符串（列表 / 字典），以及**只由不可见字符组成**的串（单个零宽空格、以及
+    一串混在一起的零宽字符 / ZWJ / BOM）。上游 ``_describe`` 会把前几族都压成空串，
     但那是对接方的行为、不是渲染层可以依赖的保证 —— 只在空串上测，等于没测
-    ``None``（崩溃点）与纯空白（空段落）。
+    ``None``（崩溃点）、纯空白（空段落）与不可见字符（看不见的空段落）。
     """
 
     PLACEHOLDERS = ("（无描述）", "无描述", "暂无描述", "（平台未提供）", "未提供")
-    MISSING: tuple[object, ...] = ("", None, "   ", "\t\n", ["a"], {"k": "v"})
+    MISSING: tuple[object, ...] = (
+        "",
+        None,
+        "   ",
+        "\t\n",
+        ["a"],
+        {"k": "v"},
+        "\u200b",  # 零宽空格 —— str.strip() 拦不住的那一族
+        "\u200b\u200d\ufeff",  # 一串不可见字符
+    )
 
     def _card(self, description: object = "") -> OpportunityCard:
         finding = CompetitorFinding(
@@ -910,8 +920,8 @@ class TestCompetitorDescriptionMissing:
 
         下面几条测试都是"对 ``MISSING`` 逐项撞"，所以 ``MISSING`` 一旦被削短或换掉，
         它们不会红 —— 它们只是**静默变弱**，什么都不再证明。光钉数量不够：
-        六项全换成 ``1..6`` 长度照样达标，而 ``None`` / 纯空白 / 非字符串三族会一起
-        失去覆盖。所以钉的是"这三族都还在"。
+        八项全换成 ``1..8`` 长度照样达标，而 ``None`` / 纯空白 / 非字符串 / 不可见
+        字符四族会一起失去覆盖。所以钉的是"这四族都还在"。
         """
         assert any(m is None for m in self.MISSING), "MISSING 里没有 None —— 崩溃点失去覆盖"
         assert sum(1 for m in self.MISSING if isinstance(m, str) and not m.strip()) >= 2, (
@@ -919,6 +929,9 @@ class TestCompetitorDescriptionMissing:
         )
         assert any(not isinstance(m, str) and m is not None for m in self.MISSING), (
             "MISSING 里没有非字符串 —— repr 泄漏失去覆盖"
+        )
+        assert any(isinstance(m, str) and m.strip() for m in self.MISSING), (
+            "MISSING 里没有看不见但非空白的串 —— 不可见字符族失去覆盖"
         )
 
     def test_html_has_no_placeholder(self):

@@ -32,6 +32,7 @@ from datetime import date, datetime
 from xhs_pain_miner.models import CompetitorFinding, MiningResult, OpportunityCard
 from xhs_pain_miner.research.outcome import STATUS_LABELS
 from xhs_pain_miner.scoring.opportunity import FACTOR_LABELS, FACTOR_NAMES, NEUTRAL
+from xhs_pain_miner.text import text_or_empty
 
 MAX_CARDS = 20
 """默认最多渲染多少张卡片。"""
@@ -165,11 +166,13 @@ def _competitor_lines(card: OpportunityCard) -> list[str]:
         # 平台描述是"这条为什么算竞品"的唯一依据，人工抽检要用它 —— 而 Markdown 是
         # **要发出去**的那一份，读它的人更没法自己去查。缩进一层，不抢竞品行的重心。
         #
-        # 与 HTML 侧同一条口径，挡住三件"其实等于没有"的输入：``None``、非字符串、
-        # 纯空白串 —— 最后一个放过去会印出一个空的引用块行。上游 ``_describe``
-        # 目前会把它们都压成空串，但那是调用方的行为、不是渲染层可以依赖的保证。
-        raw = finding.description if isinstance(finding.description, str) else ""
-        text = raw.strip()
+        # 判"有没有内容"调的是与 HTML 侧**同一个函数**（见
+        # :func:`~xhs_pain_miner.text.text_or_empty`）：``None``、非字符串、空白族、
+        # 不可见字符族都算"没有"。放过去的话，前两类会抛异常或把 Python 的
+        # ``repr`` 印进产物，后两类会印出一个**空的引用块行**（不可见字符那一族的
+        # 空还看不出来是怎么来的）。上游 ``_describe`` 目前会把它们都压成空串，
+        # 但那是调用方的行为、不是渲染层可以依赖的保证。
+        text = text_or_empty(finding.description)
         if text:
             if len(text) > _COMPETITOR_DESC_CHARS:
                 text = text[: _COMPETITOR_DESC_CHARS - 1] + "…"
