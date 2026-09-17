@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import date, datetime, timedelta, timezone
 from typing import cast
 
@@ -208,8 +209,17 @@ class TestPainStrength:
 
 
 class TestMentionVolume:
-    def test_largest_cluster_is_one(self):
-        assert mention_volume(cluster(size=42), max_size=42) == 1.0
+    def test_largest_cluster_saturates_once_evidence_is_enough(self):
+        """头名 + 绝对量已达证据充分线 → 满分。"""
+        assert mention_volume(cluster(size=200), max_size=200) == 1.0
+
+    def test_largest_cluster_below_the_reference_is_discounted(self):
+        """★ 头名但绝对量不足 → **不拿满分**。
+
+        相对项在 ``size == max_size`` 时恒等于 1.0，只有绝对项能拦住它 —— 一条
+        只被 42 次提及的痛点在薄语料里就是头名，但它不该和 543 次的痛点同分。
+        """
+        assert mention_volume(cluster(size=42), max_size=42) == pytest.approx(0.9566, abs=1e-3)
 
     def test_zero_max_size_is_zero(self):
         assert mention_volume(cluster(size=10), max_size=0) == 0.0
@@ -218,13 +228,93 @@ class TestMentionVolume:
         assert mention_volume(cluster(size=0), max_size=10) == 0.0
 
     def test_log_normalization_keeps_long_tail_visible(self):
-        """线性归一会让第 10 名挤在 0 附近；log 归一必须把它留在可区分区间。"""
+        """线性归一会让第 10 名挤在 0 附近；log 归一（再乘绝对折扣）必须把它留在可区分区间。"""
         value = mention_volume(cluster(size=10), max_size=100)
-        assert value == pytest.approx(0.5205, abs=0.01)
+        assert value == pytest.approx(0.3169, abs=0.01)
         assert value > 0.1  # 线性值
 
     def test_never_exceeds_one(self):
         assert mention_volume(cluster(size=500), max_size=100) == 1.0
+
+    def test_clamp_applies_to_the_whole_product(self):
+        """★ ``size > max_size``（契约外输入）时，clamp 必须作用在**乘积**上。
+
+        期望值由**文档公式**推出，而不是抄两个手算小数 —— 这样钉住的是"两项先相乘、
+        再整体 clamp"这个**组合顺序**本身。``_clamp(relative) * confidence`` 这种
+        "顺手优化"会让 ``mv(30, 20)`` 从 0.9851 掉到 0.8734、``mv(49, 10)`` 从
+        1.0 掉到 0.9950。
+
+        ``build_cards`` 构造不出这种输入（基准本来就是最大簇），但 ``mention_volume``
+        是公开函数，且 docstring 已把该行为写成契约（见其 Args/Returns）。
+        """
+        relative = math.log1p(30) / math.log1p(20)
+        confidence = min(1.0, math.log1p(30) / math.log1p(50))
+        assert mention_volume(cluster(size=30), max_size=20) == pytest.approx(relative * confidence)
+        assert mention_volume(cluster(size=49), max_size=10) == 1.0
+
+    def test_head_of_a_thin_corpus_is_not_a_full_house(self):
+        """★ 薄语料里的头名不得拿满分 —— 绝对锚点存在的直接证据。
+
+        用户报告的场景：``[noise(1000), real(12), real2(8)]``。修复前 12 次提及的
+        ``real`` 拿满分 1.0，与 543 次提及的痛点同分 —— 只因为它是这份语料里最大的
+        **真实**痛点。修复后它按绝对提及量打折。
+        """
+        head = mention_volume(cluster(size=12), max_size=12)
+        assert head == pytest.approx(0.6524, abs=1e-3)
+        assert head < 1.0, "只有 12 次提及的痛点不该拿满分"
+        assert mention_volume(cluster(size=8), max_size=12) == pytest.approx(0.4787, abs=1e-3)
+
+    def test_absolute_term_is_capped_at_one(self):
+        """★ 绝对项必须有上界 —— 它是「置信度折扣」，不是「置信度加成」。
+
+        去掉 ``min(1.0, ...)`` 后，``size > 参照`` 的簇会把绝对项算成大于 1 的乘数，
+        等于**按提及量给分数加分**，且只在 ``size > 50 且 max_size > 50`` 时显形 ——
+        正是证据最足的那批簇、错了最不该错的地方。被 ``_clamp`` 截住的那些（如
+        ``mv(200, 543)`` 会虚高到 1.0）连夹逼都看不出来，所以必须钉具体值。
+        """
+        assert mention_volume(cluster(size=200), max_size=543) == pytest.approx(0.8419, abs=1e-3)
+        assert mention_volume(cluster(size=100), max_size=1000) == pytest.approx(0.6680, abs=1e-3)
+        # size 再大也不许被"够大了就直接给满分"的捷径放过：置信度饱和之后，相对项
+        # 仍要说话 —— 头名 5000 次、次名 1000 次的语料里，后者不该跟着满分。
+        assert mention_volume(cluster(size=1000), max_size=5000) == pytest.approx(0.8111, abs=1e-3)
+
+    def test_absolute_discount_only_depends_on_cluster_size(self):
+        """★ 绝对折扣只由簇自己的 size 决定，不被语料规模稀释。
+
+        头名的相对项恒为 1.0，因此 ``mv(12, 12)`` 就是绝对项的指纹。用同一簇在更大
+        语料里的取值去除它，剩下的应该**只有**相对项 —— 若绝对项被误写成由
+        ``max_size`` 决定（``log1p(max_size) / log1p(REF)`` 是个容易犯的错），
+        这个比值立刻偏离。
+        """
+        thin = mention_volume(cluster(size=12), max_size=12)  # 1.0 × 折扣
+        wide = mention_volume(cluster(size=12), max_size=543)  # 相对项 × 折扣
+        assert thin == pytest.approx(0.6524, abs=1e-3)
+        assert wide / thin == pytest.approx(math.log1p(12) / math.log1p(543), abs=1e-6)
+
+    def test_absolute_term_bites_even_in_a_healthy_corpus(self):
+        """★ 绝对项在健康语料里也必须生效 —— 「相乘而非取 min」的守卫。
+
+        ``min(相对项, 绝对项)`` 在 ``max_size`` 已达参照时恒等于相对项（那时
+        ``相对项 ≤ 绝对项`` 总成立），于是绝对项只在薄语料里起作用，健康语料里
+        绝对量同样不足的尾部簇原样拿回旧分数 —— 543 次的语料里 17 次提及仍是
+        0.4589，与"证据不足要打折"直接相悖。相乘则一律打折。
+        """
+        relative_only = math.log1p(17) / math.log1p(543)
+        assert mention_volume(cluster(size=17), max_size=543) < relative_only
+
+    def test_relative_ranking_survives_in_a_large_corpus(self):
+        """相对排序不能被绝对项吞掉：60 次与 1000 次提及的大簇必须不同分。"""
+        small = mention_volume(cluster(size=60), max_size=1000)
+        big = mention_volume(cluster(size=1000), max_size=1000)
+        assert small < big, "大语料里 60 次与 1000 次提及不能同分"
+        assert big == 1.0
+
+    def test_is_monotonic_in_size(self):
+        """同一语料内 mv 随 size 严格递增 —— 排名语义不许被破坏。"""
+        sizes = (1, 2, 5, 10, 50, 100, 500)
+        values = [mention_volume(cluster(size=size), max_size=500) for size in sizes]
+        assert values == sorted(values)
+        assert len(set(values)) == len(values), "严格递增：不允许出现并列"
 
 
 class TestGrowthTrend:
@@ -410,7 +500,9 @@ class TestDebtTolerantReaders:
         fake = PainCluster(id="p", size=2)
         fake.evidences = [_NoTimestampEvidence()] * 2  # type: ignore[list-item]
         assert 0.0 <= pain_strength(fake) <= 1.0
-        assert mention_volume(fake, max_size=2) == 1.0
+        # 与一条字段齐全、size 相同的簇拿到**同一个值**：缺 created_at 不该改变
+        # 因子本身。（写成 ``0.0 <= v <= 1.0`` 是恒真断言，守不住任何东西。）
+        assert mention_volume(fake, max_size=2) == mention_volume(cluster(size=2), max_size=2)
 
 
 # --------------------------------------------------------------------------- #
@@ -483,17 +575,21 @@ class TestBuildCard:
             assert 0.0 <= value <= 1.0
 
     def test_score_matches_hand_computation(self):
-        """★ 手算校验：每个因子都构造成确定值，总分必须等于手算结果。"""
+        """★ 手算校验：每个因子都构造成确定值，总分必须等于手算结果。
+
+        ``size == max_size`` 只是提及量的**相对项**取 1.0；要拿到因子 1.0 还需要
+        绝对量达标，所以这里把簇做到 100 次提及。
+        """
         card = build_card(
-            cluster(size=10, sentiment=-1.0, evidences=[evidence(likes=0)], difficulty=1),
+            cluster(size=100, sentiment=-1.0, evidences=[evidence(likes=0)], difficulty=1),
             findings=[],
             weights=ScoreWeights(),  # 默认权重
             keyword="防晒霜",
-            max_size=10,
+            max_size=100,
         )
         expected = 100.0 * (
             0.25 * 0.5  # 痛点强度：情感 -1 但零点赞 → 0.5 × 1.0
-            + 0.20 * 1.0  # 提及量：本身就是最大簇
+            + 0.20 * 1.0  # 提及量：最大簇且已达证据充分线
             + 0.20 * 0.5  # 增长趋势：无时间戳 → 中性
             + 0.25 * 1.0  # 竞品空白度：查证过没有竞品
             + 0.10 * 1.0  # 实现难度：difficulty=1
@@ -502,6 +598,30 @@ class TestBuildCard:
         assert card.score == pytest.approx(77.5, abs=0.05)
         assert card.score_breakdown["pain_strength"] == pytest.approx(0.5)
         assert card.score_breakdown["growth_trend"] == NEUTRAL
+
+    def test_score_matches_hand_computation_with_a_discounted_mention_volume(self):
+        """★ 手算校验（提及量被绝对项打折的那一支）：10 次提及的头名拿 0.6099，不是 1.0。
+
+        上一条走的是"绝对量达标"的分支，这条走"薄语料头名"的分支 —— 两条分支都
+        必须能手算出来，否则公式里就有一段没人验过的路。
+        """
+        card = build_card(
+            cluster(size=10, sentiment=-1.0, evidences=[evidence(likes=0)], difficulty=1),
+            findings=[],
+            weights=ScoreWeights(),
+            keyword="防晒霜",
+            max_size=10,
+        )
+        expected = 100.0 * (
+            0.25 * 0.5
+            + 0.20 * (math.log1p(10) / math.log1p(50))  # 提及量：相对项 1.0 × 绝对折扣
+            + 0.20 * 0.5
+            + 0.25 * 1.0
+            + 0.10 * 1.0
+        )
+        assert card.score == pytest.approx(expected, abs=0.05)
+        assert card.score == pytest.approx(69.7, abs=0.05)
+        assert card.score_breakdown["mention_volume"] == pytest.approx(0.6099, abs=1e-3)
 
     def test_score_matches_hand_computation_with_custom_weights(self):
         """自造权重下同样可手算：3:1 归一后为 0.75 / 0.25。"""
@@ -581,7 +701,7 @@ class TestBuildCards:
         assert [card.pain.id for card in cards] == ["a"]
 
     def test_mention_volume_is_normalized_by_the_largest_cluster(self):
-        """归一化基准是最大簇的 size —— 除头名外的提及量都按 log 比例落位。"""
+        """归一化基准是最大簇的 size —— 除头名外的提及量都按 log 比例**再乘绝对折扣**落位。"""
         clusters = [
             cluster(id_="huge", size=100),
             cluster(id_="mid", size=50),
@@ -622,6 +742,22 @@ class TestBuildCards:
         assert by_id["mid"].score_breakdown["mention_volume"] == pytest.approx(
             mention_volume(clusters[2], max_size=100)
         )
+
+    def test_noise_bucket_changes_nothing_about_real_pains(self):
+        """★ 上一条的不变式版本：**加不加**噪声桶，真实痛点的提及量必须逐位相同。
+
+        上一条断言的是"头名恰好 == 1.0"—— 那在绝对项引入后成了 size ≥ 参照时的
+        巧合。这里改钉不变式本身：噪声桶的存在不得以任何方式影响真实痛点的分数，
+        与参照常量取多少无关。
+        """
+        real_only = [cluster(id_="real", size=100), cluster(id_="mid", size=50)]
+        with_noise = [cluster(id_="noise", label="", size=900, is_noise=True), *real_only]
+
+        plain, _ = build_cards(real_only, findings_by_cluster={}, keyword="防晒霜")
+        noisy, _ = build_cards(with_noise, findings_by_cluster={}, keyword="防晒霜")
+        assert {card.pain.id: card.score_breakdown["mention_volume"] for card in plain} == {
+            card.pain.id: card.score_breakdown["mention_volume"] for card in noisy
+        }
 
     def test_noise_bucket_is_a_baseline_once_it_is_included(self):
         """反向守卫：``include_noise=True`` 时噪声桶确实进卡片，那它就该参与基准。
@@ -707,6 +843,86 @@ class TestBuildCards:
     def test_research_failure_warning_is_not_emitted_without_failures(self):
         _, warnings = build_cards([cluster(id_="a")], findings_by_cluster={})
         assert not any("竞品调研失败" in warning for warning in warnings)
+
+    def test_thin_corpus_is_surfaced_as_a_warning(self):
+        """★ 薄语料必须说出来。
+
+        绝对项生效后，薄语料里的头名不再拿满分。用户看到「提及量 0.65」最自然的
+        解读是"算错了" —— 报告要主动说明这是样本量不足，不是缺陷。
+        """
+        clusters = [
+            cluster(id_="noise", label="", size=1000, is_noise=True),
+            cluster(id_="real", size=12),
+        ]
+        cards, warnings = build_cards(clusters, findings_by_cluster={}, keyword="防晒霜")
+        assert cards[0].score_breakdown["mention_volume"] < 1.0, "薄语料头名不该满分"
+        assert any("语料规模偏小" in warning and "12" in warning for warning in warnings)
+
+    def test_thin_corpus_warning_is_absent_once_evidence_is_enough(self):
+        """大语料不该刷屏 —— 头名确实是满分时没什么要解释的。"""
+        clusters = [cluster(id_="a", size=500), cluster(id_="b", size=20)]
+        _, warnings = build_cards(clusters, findings_by_cluster={}, keyword="防晒霜")
+        assert not any("语料规模偏小" in warning for warning in warnings)
+
+    def test_thin_corpus_warning_survives_multiple_cards(self):
+        """★ 提示不能只在"只有一张卡片"时才出现。
+
+        薄语料是常态而非边缘。收窄成 ``len(selected) == 1`` 之类的条件会让提示在
+        多卡片时**静默消失** —— 而那正是最需要它的场景（用户在几张低分卡片之间比较）。
+        """
+        clusters = [
+            cluster(id_="a", size=12),
+            cluster(id_="b", size=8),
+            cluster(id_="c", size=5),
+        ]
+        cards, warnings = build_cards(clusters, findings_by_cluster={}, keyword="防晒霜")
+        assert len(cards) == 3
+        assert any("语料规模偏小" in warning for warning in warnings)
+
+        # "多而小"是薄语料的另一种形态：单个痛点都不大，只是数量多。判据若被改成
+        # 按**总提及量**衡量（20×10 = 200 看着很"够"），这里会静默丢掉提示。
+        many_small = [cluster(id_=f"m{i}", label=f"痛点{i}", size=10) for i in range(20)]
+        many_cards, many_warnings = build_cards(
+            many_small, findings_by_cluster={}, keyword="防晒霜"
+        )
+        assert len(many_cards) == 20
+        assert any("语料规模偏小" in warning for warning in many_warnings)
+
+    def test_thin_corpus_warning_copy_is_stable(self):
+        """★ 这是一条**文案快照**测试 —— 讲给用户听的话术是产品的一部分。
+
+        只断言两个子串是"两头不靠"：同义改写（"只是样本量还不足"）会误报，而删掉
+        中间那句安抚（「这不代表方向不好」）却不报。整体比对才能既挡住误改、也挡住
+        漏改。**有意改文案时请连带更新这里**（文案里的 50 与
+        :data:`MENTION_VOLUME_REFERENCE` 同源）。
+        """
+        _, warnings = build_cards([cluster(id_="a", size=12)], findings_by_cluster={})
+        message = next((w for w in warnings if "语料规模偏小" in w), "")
+        assert message == (
+            "本次语料规模偏小：最大的痛点也只有 12 次提及（证据充分线为 50 次），"
+            "「提及量」因子已按绝对证据量打折 —— 头名不是满分，"
+            "这不代表方向不好，只代表样本还不够多"
+        )
+
+    def test_thin_corpus_warning_boundary_is_at_the_reference_line(self):
+        """★ 判据是 ``<`` 而非 ``<=``：恰好 50 次提及就是证据充分，不该再说"规模偏小"。
+
+        49 与 50 只差 0.1 分，边界一旦写成 ``<=`` 就会把一份几乎满分的语料描述成
+        证据不足 —— 判据必须钉死在参照线上。
+        """
+        at_line, warnings = build_cards([cluster(id_="a", size=50)], findings_by_cluster={})
+        assert at_line[0].score_breakdown["mention_volume"] == 1.0
+        assert not any("语料规模偏小" in warning for warning in warnings)
+
+        _, just_below = build_cards([cluster(id_="a", size=49)], findings_by_cluster={})
+        assert any("语料规模偏小" in warning for warning in just_below)
+
+    def test_thin_corpus_warning_is_absent_when_nothing_is_reported(self):
+        """没有任何卡片时不提示 —— 没有报告可看，只有一条 noisy 警告。"""
+        clusters = [cluster(id_="a", size=3)]
+        cards, warnings = build_cards(clusters, findings_by_cluster={}, min_size=10)
+        assert cards == []
+        assert not any("语料规模偏小" in warning for warning in warnings)
 
     def test_failed_cluster_gets_neutral_gap(self):
         cards, _ = build_cards(
