@@ -169,14 +169,24 @@ class GroupResult:
         return matched
 
     def false_positives(self, keywords: Sequence[str]) -> list[str]:
-        """命中 ``expect_none`` 的条目（``名称（渠道）`` 形式，便于人工复核）。"""
+        """命中 ``expect_none`` 的**条目**（``名称（渠道）`` 形式，便于人工复核）。
+
+        ★ 按**条目**去重，不按关键词命中次数计。一条结果同时命中两个关键词
+        （``text-to-image`` 与 ``text to image``）时只能算**一条**误报 ——
+        按关键词计数会让这个数字凭空虚高，而它是验收门的量化依据。
+        """
         found: list[str] = []
+        seen: set[str] = set()
         for keyword in keywords:
             needle = keyword.casefold()
             for finding in self.findings:
                 haystack = f"{finding.name} {finding.description}".casefold()
-                if needle in haystack:
-                    found.append(f"{finding.name}（{finding.source}）")
+                if needle not in haystack:
+                    continue
+                label = f"{finding.name}（{finding.source}）"
+                if label not in seen:
+                    seen.add(label)
+                    found.append(label)
         return found
 
 
@@ -239,7 +249,7 @@ def evaluate(*, limit: int, show_found: bool) -> int:
     """跑全部对照案例并打印结论。"""
     pacer = SearchPacer()
     rows: list[tuple[str, str, int, int, int, str]] = []
-    total_fp = 0
+    by_label: dict[str, int] = {}
     m1_recall = m2_recall = 0
 
     for case in CASES:
@@ -256,7 +266,7 @@ def evaluate(*, limit: int, show_found: bool) -> int:
         for group in groups:
             matched = group.recall_hits(case.expect_any)
             fp = group.false_positives(case.expect_none)
-            total_fp += len(fp)
+            by_label[group.label] = by_label.get(group.label, 0) + len(fp)
             rows.append((case.pain, group.label, group.hits, len(matched), len(fp), group.status))
             if group.label.startswith("M1"):
                 m1_recall += 1 if matched else 0
@@ -275,7 +285,16 @@ def evaluate(*, limit: int, show_found: bool) -> int:
         f"  召回：M1 痛点名 {m1_recall}/{len(CASES)} 组命中已知竞品；"
         f"M2 解法词 {m2_recall}/{len(CASES)} 组"
     )
-    print(f"  误报（可自动检测的那一类）：{total_fp} 条")
+    # ★ 误报**按组分列**，不给合计。「噪声·无关词」是刻意构造的对照组（模拟拿通用词
+    # 去搜），它高是预期的；把三组合计成一个数字，读者会得到与事实相反的印象 ——
+    # 而 M2 组（产品实际表现）恰恰是 0。
+    print("  误报（可自动检测的那一类，按组）:")
+    for group_label, count in by_label.items():
+        note = "  ← 刻意构造的对照组，高是预期的" if group_label.startswith("噪声") else ""
+        print(f"    {group_label}：{count} 条{note}")
+    print("    ⚠️ **产品实际表现看「M2·解法词」那一行** —— 把三组合计会得出相反的印象。")
+    print("    ⚠️ 这**不是**完整误报率，只是**下界**：``expect_none`` 只覆盖了能写成")
+    print("       关键词的那一类（同名不同物）。真正的准确率要靠 ``--show-found`` 的人工抽检。")
     if m2_recall > m1_recall:
         print("  → 解法词的召回更好，符合 M2 的主张")
     elif m2_recall == m1_recall:
