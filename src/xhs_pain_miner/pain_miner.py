@@ -43,6 +43,7 @@ from xhs_pain_miner.research.outcome import QueryTrace, ResearchOutcome, build_o
 from xhs_pain_miner.research.query import SolutionQuery, build_solution_queries
 from xhs_pain_miner.research.relevance import judge_relevance
 from xhs_pain_miner.scoring.opportunity import build_cards
+from xhs_pain_miner.text import REMOVE_INVISIBLE
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Callable, Sequence
@@ -50,25 +51,6 @@ if TYPE_CHECKING:  # pragma: no cover
     from xhs_pain_miner.llm.base import BaseLLMProvider
     from xhs_pain_miner.models import TextUnit
     from xhs_pain_miner.pipeline.embed import Embedder
-
-# 不可见字符：从网页复制关键词时很常见，肉眼看不见但 strip() 不会去掉，
-# 会让「关键词是否为空」的判断失效。必须写成转义序列 —— 直接写字面字符会让
-# 这一行在代码审查时完全看不出来，也容易在编辑中被误删。
-#
-# 覆盖：软连字符 / 蒙古文元音分隔符 / 零宽字符族 / 双向文本控制符 /
-#       不可见运算符 / 双向隔离符 / 谚文填充符 / BOM
-_INVISIBLE_CHARS = (
-    "\u00ad"  # SOFT HYPHEN
-    "\u180e"  # MONGOLIAN VOWEL SEPARATOR
-    "\u200b\u200c\u200d"  # ZWSP / ZWNJ / ZWJ
-    "\u200e\u200f"  # LRM / RLM
-    "\u202a\u202b\u202c\u202d\u202e"  # 双向文本嵌入与覆盖
-    "\u2060\u2061\u2062\u2063\u2064"  # WORD JOINER / 不可见运算符
-    "\u2066\u2067\u2068\u2069"  # 双向隔离
-    "\u3164"  # HANGUL FILLER
-    "\ufeff"  # BOM / ZWNBSP
-)
-_REMOVE_INVISIBLE = str.maketrans("", "", _INVISIBLE_CHARS)
 
 _ROUTED_CHANNELS: tuple[CompetitorSource, ...] = ("github", "appstore")
 """本次真正接进来的渠道 —— 只有实现了的渠道才配拿到一条检索词。
@@ -143,7 +125,10 @@ def normalize_keyword(keyword: str) -> str:
     """
     if not isinstance(keyword, str):
         raise ValueError(f"关键词必须是字符串，收到 {type(keyword).__name__}")
-    cleaned = keyword.translate(_REMOVE_INVISIBLE).strip()
+    # 不可见字符的名单与渲染层共用一份（见 text 模块）—— 但这里是**刻意**要用它
+    # 抹掉字符：关键词要拿去平台检索，零宽字符带过去只会让检索词对不上。
+    # 渲染层不能这么做（会毁掉 emoji 序列与 RTL 排版），所以那边只用它做判断。
+    cleaned = keyword.translate(REMOVE_INVISIBLE).strip()
     if not cleaned:
         raise ValueError("关键词不能为空")
     return cleaned
