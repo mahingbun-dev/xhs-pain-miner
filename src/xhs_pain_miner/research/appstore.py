@@ -163,7 +163,7 @@ def search_apps(
     if response.status_code != 200:
         raise RuntimeError(
             f"App Store 搜索失败：HTTP {response.status_code} {response.reason_phrase}。"
-            "这不是「没有竞品」，竞品空白度必须按中性值处理。"
+            "这不是「没有竞品」—— 只是这条检索词没有查成，本次调研结果不完整。"
         )
 
     try:

@@ -361,7 +361,7 @@ class TestKnownGaps:
 
         本测试转为通过（XPASS）即代表防线已补齐，届时请：
         1. 移除 ``xfail`` 标记
-        2. 更新 docs/architecture.md 的 4.5 节与 docs/faq.md
+        2. 更新 docs/architecture.md 的 4.6 节与 docs/faq.md
         """
         cluster = PainCluster(id="p1", label="整理笔记", summary=f"她说的原话是{self.LEAK}")
         card = OpportunityCard(id="c1", title="笔记整理工具", pain=cluster)

@@ -795,12 +795,22 @@ def build_cards(
 
     # ★ 合并冲突的取舍：这一块两侧都改了，不是"两边都留"。
     #
-    # main（PR #2，提及量绝对锚点）在这之前保留的是旧的 `failed_hit` 警告，它数的是
-    # 调用方传进来的 `failed: set[str]`。M2 已经把那个参数换成了 `outcomes`，并把这句
-    # 警告换成 :func:`_unresolved_warning`（按 `unsearchable` / `failed` 分类报数，是
-    # 旧文案的**超集**：旧的只说"调研失败"，新的把"检索不到"也算了进去，而后者恰恰
-    # 是 M2 修掉的那个假空白）。所以这里**只保留 HEAD 侧**——留着旧的 `failed_hit`
-    # 会引用一个已不存在的变量，直接 `NameError`。
+    # main（PR #2，提及量绝对锚点）保留的是旧的 `failed_hit` 警告，它数的是调用方传进来
+    # 的 `failed: set[str]`；M2 已把那个参数换成 `outcomes`，并把这句警告换成了
+    # :func:`_unresolved_warning`。所以这里**只保留 M2 侧**——旧的写法引用一个已不存在的
+    # 变量，留着就是 `NameError`。
+    #
+    # ⚠️ 早先这里写过"新的 `_unresolved_warning` 是旧 `failed_hit` 的超集"，那是**错的**，
+    # 独立验证用穷举口径对照推翻了它：旧 `failed` 集合还覆盖一条可达路径 ——
+    # **同一渠道内前一条检索词查到了相关竞品、后一条被限流**（``_search_channels`` 在渠道内
+    # 首次失败即 ``break``，前面已拿到的 findings 会保留）。那条路径下 ``classify_status``
+    # 因 findings 非空判成 ``ok``、``research_failed`` 为 ``False``，于是**不进**
+    # ``_unresolved_warning``。旧口径会把它算进 ``failed`` 并退回中性值。
+    #
+    # 这条差异是**有意保留**的（评分口径不动）：既然已经拿到了真实竞品，就不该断言"没查成"。
+    # 但它丢掉的那条"结果不完整"提示由 :func:`~xhs_pain_miner.research.outcome.warning_for`
+    # 补回（见那里 ``ok`` 分支的说明），否则会出现"轨迹说必须按中性值、分数却不是中性"的
+    # 自相矛盾产物。
     unresolved = [card for card in cards if card.research_failed]
     if unresolved:
         warnings.append(_unresolved_warning(unresolved))

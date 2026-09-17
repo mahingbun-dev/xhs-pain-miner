@@ -22,10 +22,11 @@ from typing import cast
 import pytest
 
 from xhs_pain_miner.models import CompetitorFinding, Evidence, PainCluster
-from xhs_pain_miner.research.outcome import ResearchOutcome
+from xhs_pain_miner.research.outcome import QueryTrace, ResearchOutcome, build_outcome
 from xhs_pain_miner.scoring.opportunity import (
     FACTOR_NAMES,
     NEUTRAL,
+    STALE_ONLY_GAP,
     ScoreWeights,
     build_card,
     build_cards,
@@ -867,6 +868,30 @@ class TestBuildCards:
         _, warnings = build_cards([cluster(id_="a")], outcomes=no_competitor("a"))
         assert not any("没有得出结论" in warning for warning in warnings)
 
+    def test_unresolved_warning_reports_the_two_categories_separately(self):
+        """★ "没得出结论"必须**分子类报数**，不能笼统说成一句"调研失败"。
+
+        ``unsearchable``（检索不到 / 没有可用的检索词）与 ``failed``（调用失败）对用户
+        是两件不同的事：前者可以换个说法再搜一次，后者只能等额度或网络恢复。说成同一句
+        话，用户就无从决定下一步 —— 而这正是这条警告取代旧 ``failed_hit`` 文案的理由。
+
+        独立验证发现这条分组能力**此前没有任何测试守着**：把它改回笼统一句（"调研失败
+        N 个"），全量测试一条都不红。断言的落点必须在**两类措辞各自的计数**上 ——
+        只断言"出现过『没有得出结论』"查不出类别有没有被区分（现有三条断言都是这个写法）。
+
+        这里写死字面量而**不**引用 ``_INCONCLUSIVE_LABELS``：引用常量会让测试与实现同源，
+        改掉标签文案时测试跟着一起变、永远不红。文案快照就该写死（同
+        :meth:`test_thin_corpus_warning_copy_is_stable`）。
+        """
+        outcomes = {
+            "a": ResearchOutcome(status="unsearchable"),
+            "b": ResearchOutcome(status="failed"),
+        }
+        _, warnings = build_cards([cluster(id_="a"), cluster(id_="b")], outcomes=outcomes)
+        message = next((warning for warning in warnings if "没有得出结论" in warning), "")
+        assert "检索不到 / 没有可用的检索词 1 个" in message
+        assert "调用失败 1 个" in message
+
     def test_thin_corpus_is_surfaced_as_a_warning(self):
         """★ 薄语料必须说出来。
 
@@ -976,6 +1001,42 @@ class TestBuildCards:
         )
         assert cards[0].competitors == []
         assert cards[0].research_status == "unsearchable"
+
+    def test_partial_failure_with_findings_is_deliberately_not_neutral(self):
+        """★ 已找到竞品时，同渠道内**另一条检索词失败**不让空白度退回中性 —— 这是刻意的。
+
+        与 :meth:`ResearchOutcome.merged` 的跨渠道规则**故意不同**：那里退回中性是因为
+        整个渠道一处都没查到；这里已经拿到了真实竞品，"没查成"这个前提就不成立。退回
+        中性等于用一个"不知道"盖掉已经查实的证据。
+
+        这条路径可达（``_search_channels`` 在渠道内首次失败即 ``break``，先前的 findings
+        保留），而且它正是"合并时把旧 ``failed_hit`` 警告当成被 ``_unresolved_warning``
+        超集覆盖"那次误判的对象 —— 那个误判被独立验证用穷举口径对照推翻了。所以这里把
+        它显式钉死两面：**空白度由找到的竞品算出**（不是 0.5），**且结论必须带上"列表
+        可能不完整"的警告**（否则产物自相矛盾：轨迹说按中性值算，分数却不是中性）。
+        """
+        outcome = build_outcome(
+            [
+                QueryTrace(query="小红书 收藏 备份", channel="github", hits=1, kept=1),
+                QueryTrace(query="笔记 导出 工具", channel="github", error="HTTP 403 限流"),
+            ],
+            # 全部停更 → 空白度必定是 STALE_ONLY_GAP(0.75)，与中性值 0.5 拉开距离好断言
+            [finding(name="some-export-tool", stars=None, last_active=date(2015, 1, 1))],
+            subject="小红书导出",
+        )
+        assert outcome.status == "ok"
+        assert outcome.research_failed is False
+        assert outcome.warning is not None  # ← 补回来的那条"列表可能不完整"
+
+        card = build_card(
+            cluster(size=200),
+            outcome=outcome,
+            weights=ScoreWeights(),
+            keyword="小红书",
+            max_size=200,
+        )
+        assert card.score_breakdown["competitor_gap"] == pytest.approx(STALE_ONLY_GAP)
+        assert card.score_breakdown["competitor_gap"] != NEUTRAL
 
     def test_empty_input_returns_empty(self):
         assert build_cards([], outcomes={}) == ([], [])

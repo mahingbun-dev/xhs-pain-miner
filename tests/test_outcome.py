@@ -80,10 +80,11 @@ class TestClassifyStatus:
     def test_partial_failure_blocks_the_claim(self):
         """★ 有查询**没查成**时不能断言「没有竞品」—— 那次里可能正躺着竞品。
 
-        缺了这条会产出**自相矛盾**的结论：失败轨迹自己的文案写着"该簇的竞品空白度
+        缺了这条会产出**自相矛盾**的结论：失败轨迹当时的文案写着"该簇的竞品空白度
         必须按中性值处理"，而结论给出的正是 1.0、报告印「✅ 查证过，没有相关
         竞品」。跨渠道有 ``ResearchOutcome.merged`` 挡着（一个渠道没查成就不断言），
-        同渠道内原本没有 —— 同一条不变式的缺口。
+        同渠道内原本没有 —— 同一条不变式的缺口。（轨迹文案后来改成只陈述"结果不
+        完整"，处方移到 :func:`warning_for`；这条守卫本身不变。）
 
         这条路径**可达**：``_search_channels`` 在渠道内首次失败即放弃（避免加深
         限流），所以"第一条词查到、第二条被限流"正是限流随运行累积时的常见形态。
@@ -240,6 +241,39 @@ class TestJudgementFailedFlag:
 class TestWarningFor:
     def test_ok_has_no_warning(self):
         assert warning_for("ok", [ok_trace()], subject="防晒") is None
+
+    def test_ok_with_a_failed_query_warns_the_list_may_be_incomplete(self):
+        """★ 找到了竞品、但**不是每条检索词都查成** → 必须提示列表不完整。
+
+        这条路径**可达**：``_search_channels`` 在同一渠道内首次失败即 ``break``（避免
+        加深限流），前面几条检索词已经拿到的 findings 会保留。于是 ``classify_status``
+        因 findings 非空判成 ``ok``、``research_failed`` 为 ``False`` ——
+        ``_unresolved_warning`` 抓不到它，少一个入口就会静默。
+
+        缺了这条断言，产物会自相矛盾：失败轨迹原本写着"该簇的竞品空白度必须按中性值
+        处理"，而评分并没有退回中性（已拿到真实竞品，见
+        ``scoring.opportunity.build_cards``）。处方已移到结论层 —— 说的必须是**实际
+        发生的事**：列表不完整，不是"分数按中性值算"。
+        """
+        text = warning_for("ok", [ok_trace(), failed_trace("笔记 导出 工具")], subject="小红书导出")
+        assert text is not None
+        assert "可能不完整" in text
+        assert "笔记 导出 工具" in text
+
+    def test_ok_stays_silent_when_every_query_succeeded(self):
+        """没有失败就没什么可说的 —— 提示一旦变成常态，用户就会开始忽略它。"""
+        assert warning_for("ok", [ok_trace(), ok_trace("美妆")], subject="防晒") is None
+
+    def test_ok_warning_names_at_most_three_queries(self):
+        """失败词多时只报前三条，避免一整屏检索词把提示淹掉。"""
+        text = warning_for(
+            "ok",
+            [ok_trace()] + [failed_trace(name) for name in ("a", "b", "c", "d")],
+            subject="防晒",
+        )
+        assert text is not None
+        assert "「d」" not in text
+        assert all(f"「{name}」" in text for name in ("a", "b", "c"))
 
     def test_unsearchable_says_retrieval_failed_and_hints_at_the_fix(self):
         """检索不到时，文案要说清"检索不到 ≠ 不存在"，并给出可操作的下一步。

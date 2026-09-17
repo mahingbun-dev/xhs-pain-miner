@@ -251,7 +251,13 @@ class TestSearchRepositories:
             github.search_repositories("防晒霜")
         message = str(exc_info.value)
         assert "限流" in message
-        assert "中性" in message
+        # ★ 这条断言守的是「失败不许被读成没有竞品」，**不是**"文案里必须出现某个词"。
+        # 早先这里断言的是 `"中性" in message`，那等于要求轨迹去指挥评分（原文写着
+        # "该簇的竞品空白度必须按中性值处理"）。处方已移到结论层
+        # （`research.outcome.warning_for`）：轨迹只陈述发生了什么。断言的落点随之改成
+        # "消息自己说清了这不是没有竞品、且结果不完整"。
+        assert "不是「没有竞品」" in message
+        assert "结果不完整" in message
 
     def test_rate_limit_message_suggests_token(self, install_transport):
         install_transport(lambda request: rate_limited(403))

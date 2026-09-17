@@ -384,7 +384,9 @@ class TestFailures:
 
         message = str(exc_info.value)
         assert "不是「没有竞品」" in message
-        assert "中性" in message
+        # 同 `test_github` 的说明：处方性的"必须按中性值处理"已从轨迹层移走 ——
+        # 轨迹只陈述发生了什么，该不该退回中性是结论层的判断。
+        assert "结果不完整" in message
 
     def test_invalid_json_raises(self, install_transport):
         install_transport(lambda request: httpx.Response(200, text="<html>oops</html>"))
