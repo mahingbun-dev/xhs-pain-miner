@@ -153,6 +153,24 @@ class Settings(BaseSettings):
     这比"跑一半失败"诚实得多。
     """
 
+    research_max_queries_per_cluster: int = 4
+    """每个簇最多发出几条检索词（跨渠道合计）。
+
+    检索词生成阶段的提示词最多让它给 6 条，这里默认再压到 4 条 —— **每一条都是一次
+    平台请求**，而 GitHub 的匿名额度约 10 次/分钟：12 个簇 × 4 条 = 48 次请求，
+    按 :data:`~xhs_pain_miner.research.github.SEARCH_INTERVAL_ANONYMOUS` 节流也要跑
+    近 5 分钟。调大它之前请先配好 ``GITHUB_TOKEN``（额度提到 30 次/分钟），
+    否则多出来的词多半以"被限流"收场，反而把该簇的结论打回中性值。
+    """
+
+    appstore_country: str = "cn"
+    """App Store 检索的商店区域。
+
+    默认中国区：小红书痛点的解法基本是面向中文用户的 App，而同一个词在不同区域的
+    召回完全不同。取值传给 iTunes Search API 的 ``country`` 参数（见
+    :data:`~xhs_pain_miner.research.appstore.DEFAULT_COUNTRY`）。
+    """
+
     # ----------------------------------------------------------------- 评分 --
     # 五个因子的权重。可调是本产品与黑箱评分产品的差异点之一 —— 觉得竞品更
     # 重要就把 weight_competitor_gap 调到 0.4，分数会立刻重算。

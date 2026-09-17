@@ -4,7 +4,8 @@
 
 1. **调研失败 ≠ 没有竞品** —— ``competitor_gap(research_failed=True)`` 必须是中性值。
    这是本文件最要紧的一条：它一旦失效，一次网络抖动就会凭空造出一个高分假机会，
-   而用户会照着它去选题。
+   而用户会照着它去选题。M2 之后这条规则还多了一侧：**"没查过"（``unsearchable``）
+   与"查不到"一样属于"不知道"**，绝不能拿满分。
 2. **缺数据取中性值，不取 0** —— 没有时间戳、没有难度标注时不能当成"确认很差"。
 3. **权重归一化后再用** —— 用户把权重调成 ``{pain_strength: 5}`` 时总分不爆表。
 
@@ -21,9 +22,11 @@ from typing import cast
 import pytest
 
 from xhs_pain_miner.models import CompetitorFinding, Evidence, PainCluster
+from xhs_pain_miner.research.outcome import QueryTrace, ResearchOutcome, build_outcome
 from xhs_pain_miner.scoring.opportunity import (
     FACTOR_NAMES,
     NEUTRAL,
+    STALE_ONLY_GAP,
     ScoreWeights,
     build_card,
     build_cards,
@@ -33,6 +36,24 @@ from xhs_pain_miner.scoring.opportunity import (
     mention_volume,
     pain_strength,
 )
+
+VERIFIED_EMPTY = ResearchOutcome(status="no_competitor")
+"""一个"查证过、确实没有竞品"的结论（空白度 1.0）。
+
+M1 的 ``build_card`` 只收一个竞品列表，空列表默认被读成"查证过没有竞品"；
+M2 之后**结论必须显式给出**，于是这个最常见的取值被提成常量，免得每处都手写。
+"""
+
+
+def no_competitor(*ids: str) -> dict[str, ResearchOutcome]:
+    """``cluster.id`` → "查证过、确实没有竞品"。"""
+    return {id_: VERIFIED_EMPTY for id_ in ids}
+
+
+def failed_outcomes(*ids: str) -> dict[str, ResearchOutcome]:
+    """``cluster.id`` → "这次没查成"（网络/限流）。"""
+    return {id_: ResearchOutcome(status="failed") for id_ in ids}
+
 
 TODAY = date.today()
 BASE = datetime(2025, 1, 1, tzinfo=timezone.utc)
@@ -514,7 +535,7 @@ class TestBuildCard:
     def test_id_is_derived_from_cluster_id(self):
         card = build_card(
             cluster(id_="cluster-7"),
-            findings=[],
+            outcome=VERIFIED_EMPTY,
             weights=ScoreWeights(),
             keyword="防晒霜",
             max_size=10,
@@ -523,7 +544,7 @@ class TestBuildCard:
 
     def test_id_is_reproducible(self):
         """同一份语料两次运行必须得到同一个 ID，否则历史趋势对比无从谈起。"""
-        args = dict(findings=[], weights=ScoreWeights(), keyword="防晒霜", max_size=10)
+        args = dict(outcome=VERIFIED_EMPTY, weights=ScoreWeights(), keyword="防晒霜", max_size=10)
         first = build_card(cluster(), **args)
         second = build_card(cluster(), **args)
         assert first.id == second.id
@@ -533,7 +554,7 @@ class TestBuildCard:
         """标题是"要做什么"，label 是"用户卡在哪"，两者不能是同一句话。"""
         card = build_card(
             cluster(label="假白泛白"),
-            findings=[],
+            outcome=VERIFIED_EMPTY,
             weights=ScoreWeights(),
             keyword="防晒霜",
             max_size=10,
@@ -544,7 +565,7 @@ class TestBuildCard:
     def test_direction_pattern_is_used_when_pain_pattern_matches(self):
         card = build_card(
             cluster(label="导出太麻烦"),
-            findings=[],
+            outcome=VERIFIED_EMPTY,
             weights=ScoreWeights(),
             keyword="笔记工具",
             max_size=10,
@@ -557,7 +578,7 @@ class TestBuildCard:
         raw = "我用的那支上脸假白到像糊了面粉，同事问我是不是过敏了"
         card = build_card(
             cluster(label="<未命名痛点 #3>", evidences=[evidence(text=raw)]),
-            findings=[],
+            outcome=VERIFIED_EMPTY,
             weights=ScoreWeights(),
             keyword="防晒霜",
             max_size=10,
@@ -568,7 +589,7 @@ class TestBuildCard:
 
     def test_breakdown_covers_every_factor_in_order(self):
         card = build_card(
-            cluster(), findings=[], weights=ScoreWeights(), keyword="防晒霜", max_size=10
+            cluster(), outcome=VERIFIED_EMPTY, weights=ScoreWeights(), keyword="防晒霜", max_size=10
         )
         assert tuple(card.score_breakdown) == FACTOR_NAMES
         for value in card.score_breakdown.values():
@@ -581,8 +602,14 @@ class TestBuildCard:
         绝对量达标，所以这里把簇做到 100 次提及。
         """
         card = build_card(
+            # ★ 合并冲突的取舍：size 取 main 侧（PR #2 从 10 改成 100），API 名取 HEAD 侧。
+            #
+            # 这不是二选一的口味问题：M2 侧原来的 ``size=10, max_size=10`` 在 PR #2 的新
+            # 公式下算出来是 ``1.0 × log1p(10)/log1p(50) = 0.6099``，不是 1.0 —— 保留它
+            # 这条测试就会红。PR #2 正是为此把簇做到 100 次提及（相对项 1.0 × 绝对项
+            # 1.0），并另加了一条专门覆盖"薄语料头名被打折"那一支的测试。
             cluster(size=100, sentiment=-1.0, evidences=[evidence(likes=0)], difficulty=1),
-            findings=[],
+            outcome=VERIFIED_EMPTY,
             weights=ScoreWeights(),  # 默认权重
             keyword="防晒霜",
             max_size=100,
@@ -607,7 +634,10 @@ class TestBuildCard:
         """
         card = build_card(
             cluster(size=10, sentiment=-1.0, evidences=[evidence(likes=0)], difficulty=1),
-            findings=[],
+            # PR #2 这条测试写的是旧 API 的 ``findings=[]``（在它的基线上等价于"查证过
+            # 没有竞品"、空白度 1.0）。M2 把参数换成了 ``outcome``，git 把这条测试整个
+            # 自动合并了进来、没报冲突 —— 不改成等价结论就会是 `TypeError`。
+            outcome=VERIFIED_EMPTY,
             weights=ScoreWeights(),
             keyword="防晒霜",
             max_size=10,
@@ -627,7 +657,7 @@ class TestBuildCard:
         """自造权重下同样可手算：3:1 归一后为 0.75 / 0.25。"""
         card = build_card(
             cluster(size=10, sentiment=-1.0, evidences=[evidence(likes=0)], difficulty=1),
-            findings=[],
+            outcome=VERIFIED_EMPTY,
             weights=ScoreWeights(
                 pain_strength=3.0,
                 mention_volume=0.0,
@@ -647,7 +677,7 @@ class TestBuildCard:
         worst = cluster(size=10, sentiment=-1.0, evidences=[evidence(likes=10**6)], difficulty=1)
         card = build_card(
             worst,
-            findings=[],  # 空白度 1.0
+            outcome=VERIFIED_EMPTY,  # 空白度 1.0
             weights=ScoreWeights(pain_strength=5.0),
             keyword="防晒霜",
             max_size=10,
@@ -658,8 +688,8 @@ class TestBuildCard:
     def test_research_failure_lowers_the_score(self):
         """调研失败按中性计 —— 必须比"查证过没有竞品"低，否则就是凭空造机会。"""
         args = dict(weights=ScoreWeights(), keyword="防晒霜", max_size=10)
-        verified_empty = build_card(cluster(), findings=[], research_failed=False, **args)
-        failed = build_card(cluster(), findings=[], research_failed=True, **args)
+        verified_empty = build_card(cluster(), outcome=VERIFIED_EMPTY, **args)
+        failed = build_card(cluster(), outcome=ResearchOutcome(status="failed"), **args)
         assert failed.score_breakdown["competitor_gap"] == NEUTRAL
         assert verified_empty.score_breakdown["competitor_gap"] == 1.0
         assert failed.score < verified_empty.score
@@ -667,7 +697,7 @@ class TestBuildCard:
     def test_feasibility_text_comes_from_cluster(self):
         card = build_card(
             cluster(feasibility="个人可做 / 1-2 周"),
-            findings=[],
+            outcome=VERIFIED_EMPTY,
             weights=ScoreWeights(),
             keyword="防晒霜",
             max_size=10,
@@ -677,7 +707,7 @@ class TestBuildCard:
     def test_feasibility_text_derived_from_difficulty_when_absent(self):
         card = build_card(
             cluster(difficulty=4, feasibility=""),
-            findings=[],
+            outcome=VERIFIED_EMPTY,
             weights=ScoreWeights(),
             keyword="防晒霜",
             max_size=10,
@@ -691,13 +721,13 @@ class TestBuildCards:
             cluster(id_="small", size=2, sentiment=-0.2, evidences=[evidence()]),
             cluster(id_="big", size=50, sentiment=-1.0, evidences=[evidence(likes=100)]),
         ]
-        cards, _ = build_cards(clusters, findings_by_cluster={}, keyword="防晒霜")
+        cards, _ = build_cards(clusters, outcomes={}, keyword="防晒霜")
         assert [card.pain.id for card in cards] == ["big", "small"]
         assert cards[0].score > cards[1].score
 
     def test_min_size_filters_small_clusters(self):
         clusters = [cluster(id_="a", size=10), cluster(id_="b", size=2)]
-        cards, _ = build_cards(clusters, findings_by_cluster={}, min_size=5)
+        cards, _ = build_cards(clusters, outcomes={}, min_size=5)
         assert [card.pain.id for card in cards] == ["a"]
 
     def test_mention_volume_is_normalized_by_the_largest_cluster(self):
@@ -707,7 +737,7 @@ class TestBuildCards:
             cluster(id_="mid", size=50),
             cluster(id_="tiny", size=5),
         ]
-        cards, _ = build_cards(clusters, findings_by_cluster={}, keyword="防晒霜")
+        cards, _ = build_cards(clusters, outcomes={}, keyword="防晒霜")
         by_id = {card.pain.id: card for card in cards}
         assert by_id["huge"].score_breakdown["mention_volume"] == 1.0
         assert by_id["mid"].score_breakdown["mention_volume"] == pytest.approx(
@@ -732,7 +762,7 @@ class TestBuildCards:
             cluster(id_="real", size=100),
             cluster(id_="mid", size=50),
         ]
-        cards, _ = build_cards(clusters, findings_by_cluster={}, keyword="防晒霜")
+        cards, _ = build_cards(clusters, outcomes={}, keyword="防晒霜")
         by_id = {card.pain.id: card for card in cards}
 
         assert "noise" not in by_id, "噪声桶不该出卡片"
@@ -753,8 +783,8 @@ class TestBuildCards:
         real_only = [cluster(id_="real", size=100), cluster(id_="mid", size=50)]
         with_noise = [cluster(id_="noise", label="", size=900, is_noise=True), *real_only]
 
-        plain, _ = build_cards(real_only, findings_by_cluster={}, keyword="防晒霜")
-        noisy, _ = build_cards(with_noise, findings_by_cluster={}, keyword="防晒霜")
+        plain, _ = build_cards(real_only, outcomes={}, keyword="防晒霜")
+        noisy, _ = build_cards(with_noise, outcomes={}, keyword="防晒霜")
         assert {card.pain.id: card.score_breakdown["mention_volume"] for card in plain} == {
             card.pain.id: card.score_breakdown["mention_volume"] for card in noisy
         }
@@ -768,9 +798,7 @@ class TestBuildCards:
             cluster(id_="noise", label="", size=500, is_noise=True),
             cluster(id_="real", size=100),
         ]
-        cards, _ = build_cards(
-            clusters, findings_by_cluster={}, keyword="防晒霜", include_noise=True
-        )
+        cards, _ = build_cards(clusters, outcomes={}, keyword="防晒霜", include_noise=True)
         by_id = {card.pain.id: card for card in cards}
 
         assert by_id["noise"].score_breakdown["mention_volume"] == 1.0
@@ -782,7 +810,7 @@ class TestBuildCards:
         clusters = [cluster(id_="a"), cluster(id_="b")]
         cards, _ = build_cards(
             clusters,
-            findings_by_cluster={"a": [finding(name="only-for-a")]},
+            outcomes={"a": ResearchOutcome(findings=(finding(name="only-for-a"),), status="ok")},
             keyword="防晒霜",
         )
         by_id = {card.pain.id: card for card in cards}
@@ -790,7 +818,7 @@ class TestBuildCards:
         assert by_id["b"].competitors == []
 
     def test_default_weights_produce_no_weight_warning(self):
-        cards, warnings = build_cards([cluster()], findings_by_cluster={})
+        cards, warnings = build_cards([cluster()], outcomes={})
         assert cards
         assert not any("权重" in warning for warning in warnings)
 
@@ -798,17 +826,17 @@ class TestBuildCards:
         """用户改了一个"看起来生效了"的权重，必须被告知实际生效的值。"""
         _, warnings = build_cards(
             [cluster()],
-            findings_by_cluster={},
+            outcomes={},
             weights=ScoreWeights(pain_strength=5.0),
         )
         assert any("归一化" in warning for warning in warnings)
 
     def test_custom_weights_change_the_score(self):
         clusters = [cluster(id_="a", size=10), cluster(id_="b", size=5)]
-        default_cards, _ = build_cards(clusters, findings_by_cluster={})
+        default_cards, _ = build_cards(clusters, outcomes={})
         custom_cards, _ = build_cards(
             clusters,
-            findings_by_cluster={},
+            outcomes={},
             weights=ScoreWeights(
                 pain_strength=0.0,
                 mention_volume=0.0,
@@ -824,25 +852,62 @@ class TestBuildCards:
     def test_all_zero_weights_fall_back_and_warn(self):
         cards, warnings = build_cards(
             [cluster()],
-            findings_by_cluster={},
+            outcomes={},
             weights=ScoreWeights(0.0, 0.0, 0.0, 0.0, 0.0),
         )
         assert any("默认权重" in warning for warning in warnings)
-        expected, _ = build_cards([cluster()], findings_by_cluster={})
+        expected, _ = build_cards([cluster()], outcomes={})
         assert cards[0].score == expected[0].score
 
     def test_research_failure_is_surfaced_as_a_warning(self):
         """失败必须出现在警告里 —— 静默降级会让用户以为看到的是完整结果。"""
-        _, warnings = build_cards(
-            [cluster(id_="a")],
-            findings_by_cluster={},
-            failed_clusters=["a"],
-        )
-        assert any("竞品调研失败" in warning for warning in warnings)
+        _, warnings = build_cards([cluster(id_="a")], outcomes=failed_outcomes("a"))
+        assert any("没有得出结论" in warning for warning in warnings)
 
     def test_research_failure_warning_is_not_emitted_without_failures(self):
-        _, warnings = build_cards([cluster(id_="a")], findings_by_cluster={})
-        assert not any("竞品调研失败" in warning for warning in warnings)
+        _, warnings = build_cards([cluster(id_="a")], outcomes=no_competitor("a"))
+        assert not any("没有得出结论" in warning for warning in warnings)
+
+    def test_unresolved_warning_reports_the_two_categories_separately(self):
+        """★ "没得出结论"必须**分子类报数**，不能笼统说成一句"调研失败"。
+
+        ``unsearchable``（检索不到 / 没有可用的检索词）与 ``failed``（调用失败）对用户
+        是两件不同的事：前者可以换个说法再搜一次，后者只能等额度或网络恢复。说成同一句
+        话，用户就无从决定下一步 —— 而这正是这条警告取代旧 ``failed_hit`` 文案的理由。
+
+        独立验证发现这条分组能力**此前没有任何测试守着**：把它改回笼统一句（"调研失败
+        N 个"），全量测试一条都不红。断言的落点必须在**两类措辞各自的计数**上 ——
+        只断言"出现过『没有得出结论』"查不出类别有没有被区分（现有三条断言都是这个写法）。
+
+        这里写死字面量而**不**引用 ``_INCONCLUSIVE_LABELS``：引用常量会让测试与实现同源，
+        改掉标签文案时测试跟着一起变、永远不红。文案快照就该写死（同
+        :meth:`test_thin_corpus_warning_copy_is_stable`）。
+        """
+        outcomes = {
+            "a": ResearchOutcome(status="unsearchable"),
+            "b": ResearchOutcome(status="failed"),
+        }
+        _, warnings = build_cards([cluster(id_="a"), cluster(id_="b")], outcomes=outcomes)
+        message = next((warning for warning in warnings if "没有得出结论" in warning), "")
+        assert "检索不到 / 没有可用的检索词 1 个" in message
+        assert "调用失败 1 个" in message
+
+    def test_unresolved_warning_prints_the_actual_gap(self):
+        """★ 运行提示里印的中性值必须**等于**那张卡实际取到的空白度。
+
+        同 ``tests/test_render.py::TestPrintedNeutralValueIsTheRealOne``：独立验证发现
+        把 ``_unresolved_warning`` 里的 ``{NEUTRAL}`` 改成字面量 ``1.0``，全量 1259 条
+        测试**一条都不红**，而运行提示会印出「按中性值 1.0 计」—— ``1.0`` 正是 M1 那个
+        "查证过确实没有竞品"的最强正面信号，也正是 M2 存在的全部理由。
+
+        不断言"必须等于 0.5"（那是把常量抄一遍，改常量时测试跟着改、永远不红），
+        而是断言**印出来的数 == 那张卡实际的空白度**。
+        """
+        cards, warnings = build_cards([cluster(id_="a", size=200)], outcomes={})
+        gap = cards[0].score_breakdown["competitor_gap"]
+        assert gap == NEUTRAL, "前提：这张卡确实取中性值"
+        message = next((warning for warning in warnings if "没有得出结论" in warning), "")
+        assert f"按中性值 {gap} 计" in message
 
     def test_thin_corpus_is_surfaced_as_a_warning(self):
         """★ 薄语料必须说出来。
@@ -854,14 +919,14 @@ class TestBuildCards:
             cluster(id_="noise", label="", size=1000, is_noise=True),
             cluster(id_="real", size=12),
         ]
-        cards, warnings = build_cards(clusters, findings_by_cluster={}, keyword="防晒霜")
+        cards, warnings = build_cards(clusters, outcomes={}, keyword="防晒霜")
         assert cards[0].score_breakdown["mention_volume"] < 1.0, "薄语料头名不该满分"
         assert any("语料规模偏小" in warning and "12" in warning for warning in warnings)
 
     def test_thin_corpus_warning_is_absent_once_evidence_is_enough(self):
         """大语料不该刷屏 —— 头名确实是满分时没什么要解释的。"""
         clusters = [cluster(id_="a", size=500), cluster(id_="b", size=20)]
-        _, warnings = build_cards(clusters, findings_by_cluster={}, keyword="防晒霜")
+        _, warnings = build_cards(clusters, outcomes={}, keyword="防晒霜")
         assert not any("语料规模偏小" in warning for warning in warnings)
 
     def test_thin_corpus_warning_survives_multiple_cards(self):
@@ -875,16 +940,14 @@ class TestBuildCards:
             cluster(id_="b", size=8),
             cluster(id_="c", size=5),
         ]
-        cards, warnings = build_cards(clusters, findings_by_cluster={}, keyword="防晒霜")
+        cards, warnings = build_cards(clusters, outcomes={}, keyword="防晒霜")
         assert len(cards) == 3
         assert any("语料规模偏小" in warning for warning in warnings)
 
         # "多而小"是薄语料的另一种形态：单个痛点都不大，只是数量多。判据若被改成
         # 按**总提及量**衡量（20×10 = 200 看着很"够"），这里会静默丢掉提示。
         many_small = [cluster(id_=f"m{i}", label=f"痛点{i}", size=10) for i in range(20)]
-        many_cards, many_warnings = build_cards(
-            many_small, findings_by_cluster={}, keyword="防晒霜"
-        )
+        many_cards, many_warnings = build_cards(many_small, outcomes={}, keyword="防晒霜")
         assert len(many_cards) == 20
         assert any("语料规模偏小" in warning for warning in many_warnings)
 
@@ -896,7 +959,7 @@ class TestBuildCards:
         漏改。**有意改文案时请连带更新这里**（文案里的 50 与
         :data:`MENTION_VOLUME_REFERENCE` 同源）。
         """
-        _, warnings = build_cards([cluster(id_="a", size=12)], findings_by_cluster={})
+        _, warnings = build_cards([cluster(id_="a", size=12)], outcomes={})
         message = next((w for w in warnings if "语料规模偏小" in w), "")
         assert message == (
             "本次语料规模偏小：最大的痛点也只有 12 次提及（证据充分线为 50 次），"
@@ -910,44 +973,95 @@ class TestBuildCards:
         49 与 50 只差 0.1 分，边界一旦写成 ``<=`` 就会把一份几乎满分的语料描述成
         证据不足 —— 判据必须钉死在参照线上。
         """
-        at_line, warnings = build_cards([cluster(id_="a", size=50)], findings_by_cluster={})
+        at_line, warnings = build_cards([cluster(id_="a", size=50)], outcomes={})
         assert at_line[0].score_breakdown["mention_volume"] == 1.0
         assert not any("语料规模偏小" in warning for warning in warnings)
 
-        _, just_below = build_cards([cluster(id_="a", size=49)], findings_by_cluster={})
+        _, just_below = build_cards([cluster(id_="a", size=49)], outcomes={})
         assert any("语料规模偏小" in warning for warning in just_below)
 
     def test_thin_corpus_warning_is_absent_when_nothing_is_reported(self):
         """没有任何卡片时不提示 —— 没有报告可看，只有一条 noisy 警告。"""
         clusters = [cluster(id_="a", size=3)]
-        cards, warnings = build_cards(clusters, findings_by_cluster={}, min_size=10)
+        cards, warnings = build_cards(clusters, outcomes={}, min_size=10)
         assert cards == []
         assert not any("语料规模偏小" in warning for warning in warnings)
 
     def test_failed_cluster_gets_neutral_gap(self):
-        cards, _ = build_cards(
-            [cluster(id_="a")],
-            findings_by_cluster={},
-            failed_clusters=["a"],
-        )
+        cards, _ = build_cards([cluster(id_="a")], outcomes=failed_outcomes("a"))
         assert cards[0].score_breakdown["competitor_gap"] == NEUTRAL
 
-    def test_unknown_failed_cluster_id_is_ignored(self):
-        cards, warnings = build_cards(
+    def test_verified_empty_cluster_gets_full_gap(self):
+        """只有"查证过、确实没有"才允许拿满分 —— 与上一条是同一条不变式的两侧。"""
+        cards, _ = build_cards([cluster(id_="a")], outcomes=no_competitor("a"))
+        assert cards[0].score_breakdown["competitor_gap"] == 1.0
+
+    def test_missing_outcome_is_treated_as_not_researched(self):
+        """★ 字典里**没有**这个簇的结论时，按"没查过"处理，不能按"查证过没有竞品"。
+
+        这是 M1 默认值的翻转：以前"没有 findings"就等于"没查到竞品"（空白度 1.0，
+        机会分里最强的正面信号）。一个缺失的字典键不该发出这种信号 —— 缺省只能
+        落在保守的一侧，并且要如实出现在警告里。
+        """
+        cards, warnings = build_cards([cluster(id_="a")], outcomes={})
+        assert cards[0].research_status == "unsearchable"
+        assert cards[0].score_breakdown["competitor_gap"] == NEUTRAL
+        assert any("没有得出结论" in warning for warning in warnings)
+
+    def test_outcome_of_another_cluster_does_not_leak(self):
+        """给别的簇的结论不能被复用 —— 竞品的归属错位会让卡片指向不相干的链接。"""
+        cards, _ = build_cards(
             [cluster(id_="a")],
-            findings_by_cluster={},
-            failed_clusters=["不存在的簇"],
+            outcomes={
+                "别的簇": ResearchOutcome(findings=(finding(name="别人的竞品"),), status="ok")
+            },
         )
-        assert len(cards) == 1
-        assert not any("竞品调研失败" in warning for warning in warnings)
+        assert cards[0].competitors == []
+        assert cards[0].research_status == "unsearchable"
+
+    def test_partial_failure_with_findings_is_deliberately_not_neutral(self):
+        """★ 已找到竞品时，同渠道内**另一条检索词失败**不让空白度退回中性 —— 这是刻意的。
+
+        与 :meth:`ResearchOutcome.merged` 的跨渠道规则**故意不同**：那里退回中性是因为
+        整个渠道一处都没查到；这里已经拿到了真实竞品，"没查成"这个前提就不成立。退回
+        中性等于用一个"不知道"盖掉已经查实的证据。
+
+        这条路径可达（``_search_channels`` 在渠道内首次失败即 ``break``，先前的 findings
+        保留），而且它正是"合并时把旧 ``failed_hit`` 警告当成被 ``_unresolved_warning``
+        超集覆盖"那次误判的对象 —— 那个误判被独立验证用穷举口径对照推翻了。所以这里把
+        它显式钉死两面：**空白度由找到的竞品算出**（不是 0.5），**且结论必须带上"列表
+        可能不完整"的警告**（否则产物自相矛盾：轨迹说按中性值算，分数却不是中性）。
+        """
+        outcome = build_outcome(
+            [
+                QueryTrace(query="小红书 收藏 备份", channel="github", hits=1, kept=1),
+                QueryTrace(query="笔记 导出 工具", channel="github", error="HTTP 403 限流"),
+            ],
+            # 全部停更 → 空白度必定是 STALE_ONLY_GAP(0.75)，与中性值 0.5 拉开距离好断言
+            [finding(name="some-export-tool", stars=None, last_active=date(2015, 1, 1))],
+            subject="小红书导出",
+        )
+        assert outcome.status == "ok"
+        assert outcome.research_failed is False
+        assert outcome.warning is not None  # ← 补回来的那条"列表可能不完整"
+
+        card = build_card(
+            cluster(size=200),
+            outcome=outcome,
+            weights=ScoreWeights(),
+            keyword="小红书",
+            max_size=200,
+        )
+        assert card.score_breakdown["competitor_gap"] == pytest.approx(STALE_ONLY_GAP)
+        assert card.score_breakdown["competitor_gap"] != NEUTRAL
 
     def test_empty_input_returns_empty(self):
-        assert build_cards([], findings_by_cluster={}) == ([], [])
+        assert build_cards([], outcomes={}) == ([], [])
 
     def test_run_is_reproducible(self):
         clusters = [cluster(id_="a"), cluster(id_="b", size=3)]
-        first, _ = build_cards(clusters, findings_by_cluster={}, keyword="防晒霜")
-        second, _ = build_cards(clusters, findings_by_cluster={}, keyword="防晒霜")
+        first, _ = build_cards(clusters, outcomes={}, keyword="防晒霜")
+        second, _ = build_cards(clusters, outcomes={}, keyword="防晒霜")
         assert [(card.id, card.score, card.title) for card in first] == [
             (card.id, card.score, card.title) for card in second
         ]
@@ -968,7 +1082,7 @@ class TestTitleUniqueness:
     KEYWORD = "防晒霜"
 
     def titles_by_label(self, clusters: list[PainCluster]) -> dict[str, str]:
-        cards, _ = build_cards(clusters, findings_by_cluster={}, keyword=self.KEYWORD)
+        cards, _ = build_cards(clusters, outcomes={}, keyword=self.KEYWORD)
         assert len(cards) == len(clusters), "所有簇都该生成卡片"
         return {card.pain.label: card.title for card in cards}
 
@@ -1041,7 +1155,7 @@ class TestTitleUniqueness:
             cluster(id_="big", label="难卸妆", size=10),
             cluster(id_="tiny", label="包装难用", size=1),
         ]
-        cards, _ = build_cards(clusters, findings_by_cluster={}, keyword=self.KEYWORD, min_size=5)
+        cards, _ = build_cards(clusters, outcomes={}, keyword=self.KEYWORD, min_size=5)
 
         assert [card.pain.label for card in cards] == ["难卸妆"]
         assert cards[0].title == f"{self.KEYWORD} · 零门槛的工具"
@@ -1062,6 +1176,6 @@ class TestTitleUniqueness:
     def test_no_keyword_still_yields_unique_titles(self):
         """没有品类关键词时标题没有前缀，唯一性不能因此失效。"""
         labels = ["难卸妆", "包装难用", "不会选色号"]
-        cards, _ = build_cards(self.build(labels), findings_by_cluster={})
+        cards, _ = build_cards(self.build(labels), outcomes={})
 
         assert len({card.title for card in cards}) == 3

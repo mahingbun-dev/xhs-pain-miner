@@ -30,7 +30,9 @@ from collections.abc import Sequence
 from datetime import date, datetime
 
 from xhs_pain_miner.models import CompetitorFinding, MiningResult, OpportunityCard
+from xhs_pain_miner.research.outcome import STATUS_LABELS
 from xhs_pain_miner.scoring.opportunity import FACTOR_LABELS, FACTOR_NAMES, NEUTRAL
+from xhs_pain_miner.text import text_or_empty
 
 MAX_CARDS = 20
 """默认最多渲染多少张卡片。"""
@@ -39,6 +41,9 @@ _STAGE_LABELS = {"new": "新兴", "growing": "上升", "stable": "平稳", "decl
 
 _ALLOWED_URL_PREFIXES = ("http://", "https://")
 """链接协议白名单 —— ``javascript:`` 是合法 URL，转义拦不住它。"""
+
+_COMPETITOR_DESC_CHARS = 160
+"""竞品平台描述的截断长度，与 HTML 产物和相关性判定保持一致（见 html 的同名常量）。"""
 
 
 def _esc(value: object) -> str:
@@ -86,26 +91,62 @@ def _ago_text(value: date | datetime | None) -> str:
     return f"{days // 365} 年前"
 
 
-def _gap_is_neutral(card: OpportunityCard) -> bool:
-    """``competitor_gap`` 是否恰好等于中性值（即调研失败）。
+def _trace_lines(card: OpportunityCard) -> list[str]:
+    """检索轨迹 —— 「结论可逐条复核」的落地（理由见 html 的同名函数）。
 
-    推理依据见 :mod:`~xhs_pain_miner.render.html` 的同名函数：只有调研失败时
-    ``competitor_gap`` 才返回 0.5，因此"没有竞品且空白度为 0.5"就是"没查成"。
-    在 Markdown 里这条同样重要 —— 分享出去的文本更不能把"没查成"说成"没有竞品"。
+    它回答的是"这个结论是怎么得出来的"：搜了什么词、发给了哪个平台、平台回了几条、
+    最后留了几条。没有它，「查证过，没有相关竞品」这个结论无法被质疑 —— 而
+    Markdown 是**要发出去**的那一份，读它的人更没法自己去核。
     """
-    gap = card.score_breakdown.get("competitor_gap")
-    return gap is not None and abs(float(gap) - NEUTRAL) < 1e-9
+    if not card.research_queries:
+        return []
+    lines = ["", "**检索轨迹**（可逐条复核）", ""]
+    for trace in card.research_queries:
+        detail = (
+            f"命中 {trace.hits} 条 · 保留 {trace.kept} 条"
+            if trace.succeeded
+            # 失败的查询必须留下 —— 它正是"这次没查成"的证据，藏起来就等于
+            # 把结论说得比实际更确定
+            else f"未查成：{trace.error}"
+        )
+        lines.append(f"- `{_esc(trace.channel)}` 「{_esc(trace.query)}」 {detail}")
+    return lines
 
 
 def _competitor_lines(card: OpportunityCard) -> list[str]:
-    """竞品小节。"""
+    """竞品小节。
+
+    四种结论类别说四句不同的话，判据是卡片上的 ``research_status`` —— 理由与
+    :func:`~xhs_pain_miner.render.html._competitor_verdict` 完全相同，而这里更要紧：
+    Markdown 产物是**要发出去**的那一份，把"检索不到"写成"未发现竞品"会跟着
+    这条文本一起传播出去。
+    """
+    status = card.research_status
     findings: Sequence[CompetitorFinding] = card.competitors
-    if not card.competitors and _gap_is_neutral(card):
-        return [
-            "⚠️ 竞品调研未完成（空白度按中性值 0.5 计）—— 这不代表该方向没有竞品，只是这次没查成。"
-        ]
     if not findings:
-        return ["未发现竞品 —— 查证过，目前没有可查到的成熟实现。"]
+        # 四句话的判据与顺序见 html 的同名函数：先看有没有竞品，再在**没有竞品**的
+        # 那一支里按结论类别区分（手工构造的卡片可能写出不自洽的组合）。
+        if status in ("unsearchable", "failed"):
+            label = _esc(STATUS_LABELS[status])
+            detail = (
+                # 两种成因都要写出来：检索词没返回东西 / 压根没有可用的检索词
+                # （理由见 html 的同名函数 —— "检索不到"不是唯一的成因）。
+                "这不代表该方向没有竞品：可能是这些检索词在平台上没有返回任何东西"
+                "（换个更贴近「用户会去找什么工具」的说法再搜，往往就能搜到），"
+                "也可能是这次没有可用的检索词。"
+                if status == "unsearchable"
+                else "这不代表该方向没有竞品，只是这次没查成。"
+            )
+            return [
+                f"⚠️ {label}（空白度按中性值 {_esc(NEUTRAL)} 计）—— {detail}",
+                *_trace_lines(card),
+            ]
+        if status == "no_competitor":
+            return [
+                f"✅ {_esc(STATUS_LABELS[status])} —— 平台能搜到内容，但没有与这个痛点相关的实现。",
+                *_trace_lines(card),
+            ]
+        return ["本次没有可展示的竞品记录。", *_trace_lines(card)]
 
     lines: list[str] = []
     for finding in findings:
@@ -121,8 +162,43 @@ def _competitor_lines(card: OpportunityCard) -> list[str]:
             parts.append("**已停更**" if finding.is_stale else "仍在维护")
         else:
             parts.append("最后活跃时间未知")
-        gap = f"：{_esc(finding.gap_notes)}" if finding.gap_notes else ""
-        lines.append(f"- {_link(finding.url, finding.name)} — {' · '.join(parts)}{gap}")
+        lines.append(f"- {_link(finding.url, finding.name)} — {' · '.join(parts)}")
+        # 平台描述是"这条为什么算竞品"的唯一依据，人工抽检要用它 —— 而 Markdown 是
+        # **要发出去**的那一份，读它的人更没法自己去查。缩进一层，不抢竞品行的重心。
+        #
+        # 判"有没有内容"调的是与 HTML 侧**同一个函数**（见
+        # :func:`~xhs_pain_miner.text.text_or_empty`）：``None``、非字符串、空白族、
+        # 不可见字符族都算"没有"。放过去的话，前两类会抛异常或把 Python 的
+        # ``repr`` 印进产物，后两类会印出一个**空的引用块行**（不可见字符那一族的
+        # 空还看不出来是怎么来的）。上游 ``_describe`` 目前会把它们都压成空串，
+        # 但那是调用方的行为、不是渲染层可以依赖的保证。
+        text = text_or_empty(finding.description)
+        if text:
+            if len(text) > _COMPETITOR_DESC_CHARS:
+                text = text[: _COMPETITOR_DESC_CHARS - 1] + "…"
+            lines.append(f"  > {_esc(text)}")
+        if finding.gap_notes:
+            lines.append(f"  > {_esc(finding.gap_notes)}")
+
+    # 「这些竞品没验过」必须出现在**卡片自己**的小节里，不能只留在运行提示里：
+    # 判定失败时候选被全部保留（保守取舍），卡片会与一次正常判定**长得一模一样**，
+    # 用户会把一次 LLM 抖动当成"这个方向真的已经有这些竞品"—— 那正是 M2 验收门
+    # 要抓的误报。
+    #
+    # ★ 判据走 :attr:`OpportunityCard.research_incomplete`（派生属性），与 HTML 侧
+    # 同一个。原来这里写 ``card.research_failed``，在有 findings 的分支里它**恒为
+    # False**，于是"同渠道内有检索词没查成"这条真实场景在 Markdown 产物里一个字都
+    # 不提 —— 两个渲染器各写各的判据，漂移就是这么发生的。
+    if card.research_judgement_failed:
+        lines.append(
+            "⚠️ **这些竞品未经相关性判定**（本次判定失败，候选被全量保留）—— "
+            "它们不一定真的与这个痛点相关，请点开自行判断，"
+            "也不要据此认为这个方向已经有人做了。"
+        )
+    elif card.research_incomplete:
+        lines.append("（本次调研未完成，结果可能不完整）")
+
+    lines.extend(_trace_lines(card))
     return lines
 
 
@@ -227,7 +303,7 @@ def render_markdown(
     lines.extend(
         [
             "机会分 = 100 × Σ(权重 × 因子得分)；因子得分均已归一化到 0-1，"
-            "缺数据的因子取中性值 0.5（0 的含义是「确认这个维度很差」）。",
+            f"缺数据的因子取中性值 {_esc(NEUTRAL)}（0 的含义是「确认这个维度很差」）。",
             "",
             "由 XHS Pain Miner 生成。",
             "",

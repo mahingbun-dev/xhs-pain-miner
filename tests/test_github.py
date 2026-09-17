@@ -1,11 +1,21 @@
-"""竞品调研模块测试。
+"""GitHub 渠道测试。
 
 **不联网**：所有 HTTP 请求都走注入的 ``httpx.MockTransport``（假传输层），
 既不 monkeypatch httpx 内部实现，也不真的等限速间隔。
 
-重点是那条最危险的失败模式：**限流必须抛错，绝不能返回空列表**。空列表的含义
-是"查证过确实没有竞品"，会被 ``competitor_gap`` 解读成最强的正面信号 —— 一次
-网络抖动就能凭空造出一个高机会分的假机会（不变式 3）。
+重点是三件容易静默出错的事：
+
+1. **限流必须抛错，绝不能返回空列表**。空列表的含义是"查证过确实没有竞品"，
+   会被 ``competitor_gap`` 解读成最强的正面信号 —— 一次网络抖动就能凭空造出一个
+   高机会分的假机会。
+2. **``total_hits`` 是 ``QueryTrace.hits`` 的来源**，而后者是 ``no_competitor``
+   （1.0）与 ``unsearchable``（中性）之间唯一的判据 —— 它不能在任一方向上失真。
+3. **``description`` 必须带出来**。它是相关性判定的主要依据；M1 让它恒为空串，
+   于是判定只能看仓库名（``Dujltqzv/Some-Many-Books`` 这个名字看不出它是个
+   "个人书籍收藏清单"），而 GitHub 恰好是 M1 唯一在用的渠道。
+
+M1 的 ``build_queries``（拿痛点名拼检索词）已随 M2 删除 —— 检索词只能来自
+:mod:`~xhs_pain_miner.research.query` 的解法词生成，那正是 M2 修的方向性缺陷。
 """
 
 from __future__ import annotations
@@ -17,8 +27,6 @@ from typing import Any
 import httpx
 import pytest
 
-from xhs_pain_miner.models import Evidence, PainCluster
-from xhs_pain_miner.pipeline.label import DEGRADED_LABEL_TEMPLATE
 from xhs_pain_miner.research import github
 
 Handler = Callable[[httpx.Request], httpx.Response]
@@ -29,16 +37,6 @@ Handler = Callable[[httpx.Request], httpx.Response]
 # --------------------------------------------------------------------------- #
 
 
-def make_cluster(label: str = "假白搓泥", *, evidence: str = "") -> PainCluster:
-    """造一个已命名的簇。"""
-    return PainCluster(
-        id="cluster-1",
-        label=label,
-        size=1,
-        evidences=[Evidence(text=evidence or "上脸假白到像糊了面粉", source="comment", likes=3)],
-    )
-
-
 def repo(
     full_name: str,
     *,
@@ -46,22 +44,39 @@ def repo(
     pushed_at: Any = "2024-03-01T10:00:00Z",
     updated_at: Any = "2026-09-01T10:00:00Z",
     url: str | None = None,
+    description: Any = "帮你解决防晒问题的工具",
     **extra: Any,
 ) -> dict[str, Any]:
-    """构造一条 GitHub 搜索结果。"""
+    """构造一条 GitHub 搜索结果（字段名与真实响应一致）。"""
     payload: dict[str, Any] = {
         "full_name": full_name,
         "html_url": url if url is not None else f"https://github.com/{full_name}",
         "stargazers_count": stars,
         "pushed_at": pushed_at,
         "updated_at": updated_at,
+        "description": description,
     }
     payload.update(extra)
     return payload
 
 
-def search_payload(items: Sequence[dict[str, Any]]) -> httpx.Response:
-    return httpx.Response(200, json={"total_count": len(items), "items": list(items)})
+def search_payload(
+    items: Sequence[dict[str, Any]],
+    *,
+    total_count: int | None = None,
+) -> httpx.Response:
+    """构造一次 GitHub 搜索响应。
+
+    默认让 ``total_count`` 等于实际条数。真实响应里 ``total_count`` 是全站命中数、
+    通常远大于本次返回的条数，需要探测这种偏离的用例会显式覆盖它。
+    """
+    return httpx.Response(
+        200,
+        json={
+            "total_count": len(items) if total_count is None else total_count,
+            "items": list(items),
+        },
+    )
 
 
 class Recorder:
@@ -126,62 +141,7 @@ def rate_limited(status: int = 403) -> httpx.Response:
 
 
 # --------------------------------------------------------------------------- #
-# build_queries
-# --------------------------------------------------------------------------- #
-
-
-class TestBuildQueries:
-    """搜索词生成。"""
-
-    def test_uses_label_not_raw_evidence(self):
-        long_text = "我买的那支防晒霜上脸假白到像糊了面粉，同事问我是不是过敏了，太尴尬了"
-        cluster = make_cluster("假白", evidence=long_text)
-        queries = github.build_queries(cluster, keyword="防晒霜")
-
-        assert queries
-        for query in queries:
-            assert long_text not in query
-        assert "假白" in queries[0]
-
-    def test_keyword_narrows_scope(self):
-        queries = github.build_queries(make_cluster("搓泥"), keyword="防晒霜")
-        assert queries == ["搓泥", "搓泥 防晒霜"]
-
-    def test_keyword_already_in_label_is_not_repeated(self):
-        queries = github.build_queries(make_cluster("防晒霜搓泥"), keyword="防晒霜")
-        assert queries == ["防晒霜搓泥"]
-
-    def test_caps_query_count(self):
-        queries = github.build_queries(make_cluster("搓泥"), keyword="防晒霜", max_queries=1)
-        assert len(queries) == 1
-
-    @pytest.mark.parametrize("max_queries", [0, -1])
-    def test_zero_budget_yields_nothing(self, max_queries: int):
-        cluster = make_cluster("搓泥")
-        assert github.build_queries(cluster, keyword="防晒霜", max_queries=max_queries) == []
-
-    @pytest.mark.parametrize("label", ["", "   ", "\n", "。。。", "「」"])
-    def test_unusable_label_yields_nothing(self, label: str):
-        """标签为空或纯标点时不能拿原文去搜，也不能搜一堆标点。"""
-        cluster = make_cluster(label, evidence="上脸假白到像糊了面粉")
-        assert github.build_queries(cluster, keyword="防晒霜") == []
-
-    def test_degraded_placeholder_label_yields_nothing(self):
-        """占位名搜出来的空结果会被误读成"没有竞品"，必须直接放弃。"""
-        cluster = make_cluster(DEGRADED_LABEL_TEMPLATE.format(index=3))
-        assert github.build_queries(cluster, keyword="防晒霜") == []
-
-    def test_long_label_is_truncated(self):
-        queries = github.build_queries(make_cluster("痛" * 200), keyword="")
-        assert len(queries[0]) <= 40
-
-    def test_whitespace_is_flattened(self):
-        queries = github.build_queries(make_cluster("假白\n  搓泥"), keyword="")
-        assert queries[0] == "假白 搓泥"
-
-
-# --------------------------------------------------------------------------- #
-# search_repositories
+# search_repositories：契约（候选 + 平台自报命中数）
 # --------------------------------------------------------------------------- #
 
 
@@ -194,15 +154,34 @@ class TestSearchRepositories:
                 [repo("someone/sunscreen-tool", stars=42, pushed_at="2025-01-05T08:00:00Z")]
             )
         )
-        findings = github.search_repositories("防晒霜搓泥")
+        result = github.search_repositories("防晒霜搓泥")
 
-        assert len(findings) == 1
-        finding = findings[0]
+        assert len(result.findings) == 1
+        finding = result.findings[0]
         assert finding.source == "github"
         assert finding.name == "someone/sunscreen-tool"
         assert finding.url == "https://github.com/someone/sunscreen-tool"
         assert finding.stars == 42
         assert finding.last_active == date(2025, 1, 5)
+
+    def test_exposes_total_count_as_total_hits(self, install_transport):
+        """平台自报的全站命中数必须暴露出来 —— 它是 ``QueryTrace.hits`` 的来源。"""
+        install_transport(lambda request: search_payload([repo("a/b")], total_count=1742))
+        assert github.search_repositories("防晒霜").total_hits == 1742
+
+    def test_total_hits_is_zero_when_platform_returned_nothing(self, install_transport):
+        install_transport(lambda request: search_payload([]))
+        assert github.search_repositories("防晒霜").total_hits == 0
+
+    def test_empty_result_still_carries_findings_list(self, install_transport):
+        install_transport(lambda request: search_payload([]))
+        assert github.search_repositories("防晒霜").findings == []
+
+    def test_limit_zero_returns_empty_without_a_request(self, install_transport):
+        recorder = install_transport(lambda request: search_payload([]))
+        result = github.search_repositories("防晒霜", limit=0)
+        assert (result.findings, result.total_hits) == ([], 0)
+        assert recorder.requests == []
 
     def test_last_active_uses_pushed_at_not_updated_at(self, install_transport):
         """``updated_at`` 会被改 star / 改描述刷新，不能反映真实开发活动。"""
@@ -217,25 +196,25 @@ class TestSearchRepositories:
                 ]
             )
         )
-        finding = github.search_repositories("防晒霜")[0]
+        finding = github.search_repositories("防晒霜").findings[0]
         assert finding.last_active == date(2023, 2, 1)
         assert finding.is_stale is True
 
     def test_missing_pushed_at_is_unknown_not_today(self, install_transport):
         """缺时间戳时取 ``None``（"不知道"），不能当作"刚刚还在更新"。"""
         install_transport(lambda request: search_payload([repo("a/b", pushed_at=None)]))
-        finding = github.search_repositories("防晒霜")[0]
+        finding = github.search_repositories("防晒霜").findings[0]
         assert finding.last_active is None
 
     def test_unparsable_pushed_at_is_ignored(self, install_transport):
         install_transport(lambda request: search_payload([repo("a/b", pushed_at="昨天")]))
-        assert github.search_repositories("防晒霜")[0].last_active is None
+        assert github.search_repositories("防晒霜").findings[0].last_active is None
 
     def test_respects_limit(self, install_transport):
         install_transport(
             lambda request: search_payload([repo(f"owner/repo{i}") for i in range(10)])
         )
-        assert len(github.search_repositories("防晒霜", limit=3)) == 3
+        assert len(github.search_repositories("防晒霜", limit=3).findings) == 3
 
     def test_sends_query_and_page_size(self, install_transport):
         recorder = install_transport(lambda request: search_payload([]))
@@ -261,7 +240,7 @@ class TestSearchRepositories:
         install_transport(
             lambda request: search_payload([repo("a/b", url=""), {"full_name": "c/d"}])
         )
-        assert github.search_repositories("防晒霜") == []
+        assert github.search_repositories("防晒霜").findings == []
 
     @pytest.mark.parametrize("status", [403, 429])
     def test_rate_limit_raises_instead_of_returning_empty(self, install_transport, status: int):
@@ -272,7 +251,21 @@ class TestSearchRepositories:
             github.search_repositories("防晒霜")
         message = str(exc_info.value)
         assert "限流" in message
-        assert "中性" in message
+        # ★ 这条断言守的是「失败不许被读成没有竞品」，**不是**"文案里必须出现某个词"。
+        # 早先这里断言的是 `"中性" in message`，那等于要求轨迹去指挥评分（原文写着
+        # "该簇的竞品空白度必须按中性值处理"）。处方已移到结论层
+        # （`research.outcome.warning_for`）：轨迹只陈述发生了什么。断言的落点随之改成
+        # "消息自己说清了这不是没有竞品、且结果不完整"。
+        assert "不是「没有竞品」" in message
+        assert "结果不完整" in message
+        # ★ 反向守卫：轨迹**不许**给评分下处方。
+        #
+        # 独立验证发现这是反向缺口 —— 往这条文案末尾加回"该簇的竞品空白度必须按中性值
+        # 处理。"，1148 条测试**一条都不红**（原有断言全是正向的）。而那句处方在
+        # "已找到竞品 + 另一条词被限流"这条可达路径上是**假**的：结论会是 ``ok``、
+        # 空白度按找到的竞品算出，不是中性。处方只能由结论层说。
+        assert "必须按中性值处理" not in message
+        assert "空白度" not in message
 
     def test_rate_limit_message_suggests_token(self, install_transport):
         install_transport(lambda request: rate_limited(403))
@@ -309,119 +302,115 @@ class TestSearchRepositories:
 
 
 # --------------------------------------------------------------------------- #
-# research_cluster
+# total_count 的失真方向
 # --------------------------------------------------------------------------- #
 
 
-class TestResearchCluster:
-    """单簇调研 —— 串行、限速、按 URL 去重，失败必须转成警告。"""
+class TestTotalHitsSemantics:
+    """``hits`` 决定 ``no_competitor`` 与 ``unsearchable`` 的分界，两个方向都不能失真。"""
 
-    def test_merges_and_dedupes_across_queries(self, install_transport, slept):
-        shared = repo("owner/shared", url="https://github.com/owner/shared")
-        recorder = install_transport(
-            lambda request: search_payload(
-                [repo("owner/first"), shared]
-                if request.url.params["q"] == "搓泥"
-                else [shared, repo("owner/second")]
+    def test_uses_platform_reported_count_not_page_size(self, install_transport):
+        """平台自报全站命中数时用它，不缩成"我们拿回来几条"。
+
+        取它是为了可复核：用户在 GitHub 搜索框里重放同一个词，界面上写的就是
+        这个数字。
+        """
+        install_transport(lambda request: search_payload([repo("a/b")], total_count=999))
+        assert github.search_repositories("防晒霜").total_hits == 999
+
+    def test_missing_total_count_falls_back_to_returned(self, install_transport):
+        install_transport(
+            lambda request: httpx.Response(200, json={"items": [repo("a/b"), repo("c/d")]})
+        )
+        assert github.search_repositories("防晒霜").total_hits == 2
+
+    @pytest.mark.parametrize("declared", [-1, True, "12", None])
+    def test_unusable_total_count_falls_back_to_returned(self, install_transport, declared: Any):
+        install_transport(
+            lambda request: httpx.Response(
+                200, json={"total_count": declared, "items": [repo("a/b")]}
             )
         )
+        assert github.search_repositories("防晒霜").total_hits == 1
 
-        findings, warning = github.research_cluster(make_cluster("搓泥"), keyword="防晒霜")
+    def test_declared_hits_are_zeroed_when_nothing_was_returned(self, install_transport):
+        """★ 自报有命中却一条都没返回 → 必须按 0 处理。
 
-        assert warning is None
-        assert recorder.queries == ["搓泥", "搓泥 防晒霜"]
-        assert [finding.url for finding in findings] == [
-            "https://github.com/owner/first",
-            "https://github.com/owner/shared",
-            "https://github.com/owner/second",
-        ]
+        这一条守的是"平台压根没返回东西"这条路径：把它当成"搜得到、只是不相关"
+        会把 ``unsearchable``（中性 0.5）翻成 ``no_competitor``（空白度 1.0，
+        最强的正面信号）—— 一个凭空冒出来的假机会。
+        """
+        install_transport(lambda request: search_payload([], total_count=7))
+        result = github.search_repositories("防晒霜")
+        assert result.findings == []
+        assert result.total_hits == 0
 
-    def test_caps_total_findings(self, install_transport, slept):
-        install_transport(lambda request: search_payload([repo(f"owner/r{i}") for i in range(5)]))
-        findings, _ = github.research_cluster(make_cluster("搓泥"), keyword="防晒霜", limit=2)
-        assert len(findings) == 2
 
-    def test_rate_limit_returns_warning_not_silent_empty(self, install_transport, slept):
-        """``([], None)`` 与 ``([], 警告)`` 是两个完全不同的结论。"""
-        install_transport(lambda request: rate_limited(403))
+# --------------------------------------------------------------------------- #
+# description：判定相关性的主要依据
+# --------------------------------------------------------------------------- #
 
-        findings, warning = github.research_cluster(make_cluster("搓泥"), keyword="防晒霜")
 
-        assert findings == []
-        assert warning is not None, "限流必须留下警告 —— 否则调用方会把失败当成『确实没有竞品』"
-        assert "限流" in warning
-        assert "中性" in warning
+class TestDescription:
+    """★ 只给名字判不出"它是不是真的在解决这个痛点"。"""
 
-    def test_verified_empty_is_reported_as_no_warning(self, install_transport, slept):
-        """真正的"查证过没有竞品"必须是 ``([], None)``。"""
-        install_transport(lambda request: search_payload([]))
-        findings, warning = github.research_cluster(make_cluster("搓泥"), keyword="防晒霜")
-        assert findings == []
-        assert warning is None
+    def test_description_is_kept(self, install_transport):
+        install_transport(
+            lambda request: search_payload([repo("a/b", description="个人书籍收藏清单")])
+        )
+        assert github.search_repositories("防晒霜").findings[0].description == "个人书籍收藏清单"
 
-    def test_stops_after_first_failure(self, install_transport, slept):
-        """限流后继续搜只会加深限流，必须快速放弃。"""
-        recorder = install_transport(lambda request: rate_limited(429))
-        _, warning = github.research_cluster(make_cluster("搓泥"), keyword="防晒霜")
+    def test_missing_description_is_empty_not_a_placeholder(self, install_transport):
+        """平台没给描述时留空 —— 编一句占位文案会被下游当成真实描述读进去。"""
+        install_transport(lambda request: search_payload([repo("a/b", description=None)]))
+        assert github.search_repositories("防晒霜").findings[0].description == ""
 
-        assert len(recorder.requests) == 1
-        assert warning is not None
+    def test_newlines_are_flattened(self, install_transport):
+        """判定提示词是**按行**组织的：描述里混进换行会让一条候选看起来像两条。"""
+        install_transport(
+            lambda request: search_payload([repo("a/b", description="第一行\n\n第二行")])
+        )
+        assert github.search_repositories("防晒霜").findings[0].description == "第一行 第二行"
 
-    def test_partial_results_are_kept_but_flagged(self, install_transport, slept):
-        def flaky(request: httpx.Request) -> httpx.Response:
-            if request.url.params["q"] == "搓泥":
-                return search_payload([repo("owner/first")])
-            return rate_limited(403)
+    def test_long_description_is_truncated_with_a_hint(self, install_transport):
+        install_transport(lambda request: search_payload([repo("a/b", description="痛" * 500)]))
+        description = github.search_repositories("防晒霜").findings[0].description
+        assert len(description) == github.MAX_DESCRIPTION_CHARS + 1
+        assert description.endswith("…")
 
-        install_transport(flaky)
-        findings, warning = github.research_cluster(make_cluster("搓泥"), keyword="防晒霜")
-        assert [finding.name for finding in findings] == ["owner/first"]
-        assert warning is not None
 
-    def test_paces_requests_serially(self, install_transport, slept):
-        """匿名额度约 10 次/分钟，两次请求之间必须等够间隔。"""
-        install_transport(lambda request: search_payload([]))
-        github.research_cluster(make_cluster("搓泥"), keyword="防晒霜")
+# --------------------------------------------------------------------------- #
+# 节流
+# --------------------------------------------------------------------------- #
 
-        assert len(slept) == 1
-        assert slept[0] == pytest.approx(github.SEARCH_INTERVAL_ANONYMOUS, abs=1.0)
 
-    def test_token_allows_shorter_interval(self, install_transport, slept):
-        install_transport(lambda request: search_payload([]))
-        github.research_cluster(make_cluster("搓泥"), keyword="防晒霜", token="ghp_x")
+class TestSearchPacer:
+    """GitHub 匿名额度约 10 次/分钟，两次请求之间必须补足间隔。"""
 
+    def test_first_request_does_not_wait(self, slept):
+        github.SearchPacer().wait()
+        assert slept == []
+
+    def test_second_request_waits_a_full_interval(self, slept):
+        pacer = github.SearchPacer()
+        pacer.wait()
+        pacer.wait()
+        assert slept == [pytest.approx(github.SEARCH_INTERVAL_ANONYMOUS, abs=1.0)]
+
+    def test_token_allows_shorter_interval(self, slept):
+        pacer = github.SearchPacer(token="ghp_x")
+        pacer.wait()
+        pacer.wait()
         assert slept == [pytest.approx(github.SEARCH_INTERVAL_AUTHENTICATED, abs=1.0)]
         assert github.SEARCH_INTERVAL_AUTHENTICATED < github.SEARCH_INTERVAL_ANONYMOUS
 
-    def test_single_query_does_not_sleep(self, install_transport, slept):
-        """只有一个查询词时不该白等一个间隔。"""
-        install_transport(lambda request: search_payload([]))
-        github.research_cluster(make_cluster("搓泥"), keyword="")
-        assert slept == []
+    def test_pacing_is_shared_across_clusters(self, slept):
+        """节流器是**运行范围**的：额度按"这台机器发出的请求"算，不是按簇算。
 
-    def test_degraded_label_skips_research_with_warning(self, install_transport, slept):
-        """占位名不能拿去搜 —— 搜出来的空白是假的，但空白度会当成真的。"""
-        recorder = install_transport(lambda request: search_payload([]))
-        cluster = make_cluster(DEGRADED_LABEL_TEMPLATE.format(index=2))
-
-        findings, warning = github.research_cluster(cluster, keyword="防晒霜")
-
-        assert findings == []
-        assert recorder.requests == []
-        assert warning is not None
-        assert "中性" in warning
-
-    def test_zero_limit_skips_research_with_warning(self, install_transport, slept):
-        install_transport(lambda request: search_payload([]))
-        findings, warning = github.research_cluster(make_cluster("搓泥"), keyword="防晒霜", limit=0)
-        assert findings == []
-        assert warning is not None
-
-    def test_does_not_swallow_network_failure(self, install_transport, slept):
-        def boom(request: httpx.Request) -> httpx.Response:
-            raise httpx.ConnectTimeout("超时")
-
-        install_transport(boom)
-        findings, warning = github.research_cluster(make_cluster("搓泥"), keyword="防晒霜")
-        assert findings == []
-        assert warning is not None and "未完成" in warning
+        每个簇各建一个节流器（M1 的做法）会让每个簇的第一个请求立刻发出 ——
+        12 个簇排下来就是一串脉冲，正是撞 403 的节奏。
+        """
+        pacer = github.SearchPacer()
+        for _ in range(3):  # 三次请求，跨越两个"簇"
+            pacer.wait()
+        assert len(slept) == 2

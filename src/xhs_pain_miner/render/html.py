@@ -26,10 +26,9 @@ prompt injection 可以让它吐出任意字符串。因此：
 
 呈现上的两个取舍
 ----------------
-* 竞品调研失败与"确实没有竞品"**必须显示成两句话**。卡片模型里没有
-  ``research_failed`` 字段，但 :func:`~xhs_pain_miner.scoring.opportunity.competitor_gap`
-  只在调研失败时返回中性值 0.5 —— 因此"没有竞品 **且** 空白度为 0.5"就是
-  "没查成"。这是跨模块不变式 3 在渲染层的镜像，见 :func:`_research_failed`。
+* 竞品调研的**四种结论类别**必须显示成四句不同的话（见 :func:`_competitor_verdict`）：
+  "查到竞品" / "查证过，确实没有" / "检索不到，无法判断" / "调研失败"。判据是卡片上
+  的 :attr:`~xhs_pain_miner.models.OpportunityCard.research_status`。
 * 权重不进报告表格，除非能从卡片还原出默认权重（见 :func:`_weights_view`）。
   卡片只保存因子得分与总分，**不保存权重**；编一个"权重"填进表格比不显示更糟。
 """
@@ -43,7 +42,9 @@ from pathlib import Path
 from typing import Any
 
 from xhs_pain_miner.models import Evidence, MiningResult, OpportunityCard
+from xhs_pain_miner.research.outcome import STATUS_LABELS
 from xhs_pain_miner.scoring.opportunity import FACTOR_LABELS, FACTOR_NAMES, NEUTRAL, ScoreWeights
+from xhs_pain_miner.text import text_or_empty
 
 DEFAULT_TITLE = "机会卡片"
 
@@ -61,6 +62,14 @@ _ALLOWED_URL_PREFIXES = ("http://", "https://")
 
 ``javascript:`` 是合法 URL，``html.escape`` 不会也不能拦它 —— 只有协议白名单
 能拦住。非 http(s) 的竞品链接降级成纯文本，用户仍然看得到名字。
+"""
+
+_COMPETITOR_DESC_CHARS = 160
+"""竞品平台描述在报告里截断到多少字。
+
+取 160 与 :data:`~xhs_pain_miner.research.relevance._MAX_DESCRIPTION_CHARS` 一致 ——
+判定用多少字，人就该看到多少字。不截断的话 App Store 的副标题能到上千字，
+几张卡片的报告会被描述淹没；而它存在的意义只是让"这条为什么算竞品"一眼可判。
 """
 
 _SOURCE_LABELS = {"note": "笔记", "comment": "评论"}
@@ -142,27 +151,6 @@ def _score_band(score: float) -> str:
     if score >= _SCORE_MID:
         return "mid"
     return "low"
-
-
-def _gap_is_neutral(card: OpportunityCard) -> bool:
-    """``competitor_gap`` 是否恰好等于中性值。"""
-    gap = card.score_breakdown.get("competitor_gap")
-    return gap is not None and abs(float(gap) - NEUTRAL) < 1e-9
-
-
-def _research_failed(card: OpportunityCard) -> bool:
-    """竞品调研是否失败。
-
-    ``OpportunityCard`` 没有 ``research_failed`` 字段，但
-    :func:`~xhs_pain_miner.scoring.opportunity.competitor_gap` 的返回值是可反推的：
-    **只有**调研失败时才返回中性值 0.5（无竞品 → 1.0，全部停更 → 0.75，
-    有活跃竞品 → 更低的确定值）。因此"没有竞品 **且** 空白度恰为 0.5"
-    ⟺ "这次没查成"。
-
-    这个区分是安全相关的：把"没查成"渲染成"未发现竞品，这个方向还空着"，
-    等于在报告里写下一句无依据的结论，而用户会照着它去选题。
-    """
-    return not card.competitors and _gap_is_neutral(card)
 
 
 def _weights_view(card: OpportunityCard) -> dict[str, float] | None:
@@ -285,6 +273,13 @@ a:hover{text-decoration:underline}
 .comp-gap{margin:6px 0 0;font-size:12.5px;color:var(--muted);word-break:break-word}
 .stale{color:var(--high);font-weight:600}
 .verdict{margin:10px 0 0;font-size:12.5px;line-height:1.55;color:var(--muted)}
+.traces{margin-top:8px;font-size:12px;color:var(--muted)}
+.traces summary{cursor:pointer;color:var(--brand);font-weight:600}
+.traces ul{margin:7px 0 0;padding-left:18px}
+.traces li{margin:3px 0;word-break:break-word}
+.traces code{background:var(--bg);border-radius:4px;padding:1px 5px;font-size:11.5px}
+.traces li span{margin-left:6px}
+.traces .failed{color:var(--high)}
 .empty{margin:0;font-size:12.5px;color:var(--muted);background:var(--bg);
   border:1px dashed var(--line-strong);border-radius:10px;padding:11px 13px}
 .caliber{margin-top:16px;border-top:1px dashed var(--line);padding-top:10px;
@@ -411,30 +406,128 @@ def _render_evidence(card: OpportunityCard, *, max_evidence: int) -> str:
 def _competitor_verdict(card: OpportunityCard) -> str:
     """竞品调研的一句话结论。
 
-    三种状态必须说成三句不同的话：**没查成**（中性值）/ **查了没有**（空白度满分）/
-    **有竞品**。把第一种说成第二种是本项目最危险的一类错误。
-    """
-    findings = card.competitors
-    if _research_failed(card):
-        return (
-            '<p class="verdict">⚠️ 本次竞品调研未完成，「竞品空白度」按中性值 0.5 计 —— '
-            "这不代表该方向没有竞品，只是这次没查成。</p>"
-        )
-    if not findings:
-        return '<p class="verdict">✅ 未发现竞品 —— 查证过，目前没有可查到的成熟实现。</p>'
+    **四种状态必须说成四句不同的话**，判据只能是卡片上的
+    :attr:`~xhs_pain_miner.models.OpportunityCard.research_status`：
 
-    active = [finding for finding in findings if not finding.is_stale]
-    if not active:
+    * ``ok`` —— 查到竞品（卡片上会列出它们）
+    * ``no_competitor`` —— 平台搜得到内容，只是没有与这个痛点相关的实现
+    * ``unsearchable`` —— 检索不到，无法判断
+    * ``failed`` —— 这次没查成
+
+    后两种对**用户该做什么**的指示完全不同：``unsearchable`` 可以换个更贴近
+    "用户会去找什么工具"的说法再搜一次，``failed`` 只能等额度或网络恢复。
+    把它们说成同一句话，用户就无从决定下一步。
+
+    M1 靠 ``competitor_gap == 0.5`` 反推"没查成"，那条推理有一个精确碰撞：
+    :data:`~xhs_pain_miner.scoring.opportunity.ACTIVE_COMPETITOR_COUNT_SCORE` 的下调
+    系数在"2 个活跃竞品、stars 全为 0"时恰好得到 ``0.60 × (1 - 0.5 × 0) = 0.5``
+    —— 与中性值逐位相同（扫描 stars 0…200000 × 竞品数 1…3，只有这一组命中）。
+    于是报告会在"有 2 个竞品、但都没什么热度"的卡片上多印一句"（本次调研未完成，
+    结果可能不完整）" —— 一句没有依据的话。读结论类别之后这个碰撞自然消失：
+    有竞品 ⇒ ``ok``，与空白度是多少无关。
+    """
+    status = card.research_status
+    findings = card.competitors
+    # 先按"有没有竞品"分岔，再在**没有竞品**的那一支里按结论类别说不同的四句话。
+    # 顺序不能反：手工构造的卡片可能出现"写着 no_competitor 却列出 7 个竞品"这种
+    # 不自洽的组合，那时展示真实存在的竞品，比照着状态字段断言"没有竞品"诚实。
+    if findings:
+        active = [finding for finding in findings if not finding.is_stale]
+        if not active:
+            return (
+                f'<p class="verdict">✅ {_esc(len(findings))} 个竞品均已停更 —— '
+                "有人验证过需求，但市场现在是空的。进场前请确认它为什么停下。</p>"
+            )
+        hottest = max((finding.stars or 0) for finding in active)
+        # 有竞品却仍要提示"结果可能不完整"，成因有三种，**每一种都不能被静默**：
+        #   * 同渠道内有检索词**没查成** —— 清单可能不全，漏掉的那次里可能正躺着更强势
+        #     的竞品。**流水线产出的卡片上这条曾到不了这里**：判据原先只写
+        #     ``research_failed or research_judgement_failed``，而流水线里"有 findings ⇒
+        #     状态必是 ``ok``"，两个布尔都是 False。
+        #     （"两份产物必须同判"这件事本身也有守卫：
+        #     ``tests/test_render.py::TestBothRenderersAgreeOnResearchNotes``。）
+        #   * ``research_failed`` —— 结论本身没定论（读 ``research_status``）。流水线产出的
+        #     卡片在这个分支里它是 False；**手工构造**的卡片可以是 True（同一提交的测试
+        #     参数里就有"查到竞品 · 未定论"那一格），所以它仍然留在判据里。
+        #   * ``research_judgement_failed`` —— 这些竞品**没验过**相关性（判定失败时候选
+        #     被全部保留，保守取舍）。措辞更强，见下面那条覆盖。
+        # ⚠️ 前两条同时成立时，下面那句覆盖会让"结果可能不完整"**不出现**在卡片上 ——
+        # 这是有意的（判定文案更强、更该占篇幅）。此时"清单不完整"由运行提示与检索
+        # 轨迹承载，用户仍读得到（实跑确认）。所以"三种成因都不能被静默"指的是
+        # **至少说出来一处**，不是"卡片上必须同时出现两句"。
+        # ★ 判据统一走派生属性（:attr:`OpportunityCard.research_incomplete`），不在这里
+        # 拼布尔：手写的组合漏掉了第一种成因，而这段注释本来就说三种都不能被静默 ——
+        # 一句话描述意图、一行代码实现另一个意图，正是"注释与代码不一致"的常见来源。
+        partial = "（本次调研未完成，结果可能不完整）" if card.research_incomplete else ""
+        if card.research_judgement_failed:
+            partial = "（**这些竞品未经相关性判定**，是候选全量保留的结果，请点开自行判断）"
         return (
-            f'<p class="verdict">✅ {_esc(len(findings))} 个竞品均已停更 —— '
-            "有人验证过需求，但市场现在是空的。进场前请确认它为什么停下。</p>"
+            f'<p class="verdict">🔧 {_esc(len(active))} 个竞品仍在活跃维护'
+            f"（共查到 {_esc(len(findings))} 个，最热 {_esc(hottest)}★）—— "
+            f"已有玩家，需要找差异化切口{_esc(partial)}</p>"
         )
-    hottest = max((finding.stars or 0) for finding in active)
-    partial = "（本次调研未完成，结果可能不完整）" if _gap_is_neutral(card) else ""
+
+    if status in ("unsearchable", "failed"):
+        label = _esc(STATUS_LABELS[status])
+        detail = (
+            # "检索不到"只是这个状态最常见的成因（M2 修的正是它），不是全部：
+            # 检索词生成失败、调研被关闭时也会落到这里，那时说"检索不到"就是一句
+            # 失实的话（我们根本没有发出去过任何检索词）。所以两种成因都写出来。
+            "这不代表该方向没有竞品：可能是这些检索词在平台上没有返回任何东西"
+            "（换个更贴近「用户会去找什么工具」的说法再搜，往往就能搜到），"
+            "也可能是这次没有可用的检索词。"
+            if status == "unsearchable"
+            else "这不代表该方向没有竞品，只是这次没查成。"
+        )
+        return (
+            f'<p class="verdict">⚠️ {label} —— 「竞品空白度」按中性值 '
+            f"{_num(NEUTRAL, 1)} 计，{detail}</p>"
+        )
+    if status == "no_competitor":
+        # 有轨迹才敢说"见下方" —— 手工构造的卡片可能没有，那时这句话就是空头承诺
+        hint = "（检索轨迹见下方，可逐条复核）" if card.research_queries else ""
+        return (
+            f'<p class="verdict">✅ {_esc(STATUS_LABELS[status])} —— '
+            f"平台能搜到内容，但没有与这个痛点相关的实现{hint}。</p>"
+        )
+    # ``ok`` 却没有竞品 —— 只有手工构造的卡片会这样（classify_status 产不出它）。
+    # 此时说"查证过确实没有"是没有依据的断言，如实说没有记录即可。
+    return '<p class="verdict">本次没有可展示的竞品记录。</p>'
+
+
+def _render_traces(card: OpportunityCard) -> str:
+    """检索轨迹 —— 「结论可逐条复核」这个卖点的落地。
+
+    它回答的是"这个结论是怎么得出来的"：实际搜了什么词、发给了哪个平台、平台回了
+    几条、最后留了几条。**没有它，一个「查证过，没有相关竞品」无法被质疑** ——
+    而"能被质疑"正是本产品对"免费的 LLM 摘要"的正面防守。
+
+    默认**收起**（``<details>``）：多数用户不会逐条复核，但它必须**存在且可点开**，
+    否则结论文案里那句"可逐条复核"就是一句空话。
+
+    检索词是 LLM 生成的自由文本。它出现在这里（本地产物）是刻意的，而**不出现在
+    ``to_public_dict()`` 里**也是刻意的 —— 见 :attr:`OpportunityCard.research_queries`。
+    """
+    if not card.research_queries:
+        return ""
+
+    items: list[str] = []
+    for trace in card.research_queries:
+        if trace.succeeded:
+            detail = f"命中 {trace.hits} 条 · 保留 {trace.kept} 条"
+            cls = ""
+        else:
+            # 失败的查询必须留下 —— 它正是"这次没查成"的证据，藏起来就等于
+            # 把结论说得比实际更确定
+            detail = f"未查成：{trace.error}"
+            cls = ' class="failed"'
+        items.append(
+            f"<li{cls}><code>{_esc(trace.channel)}</code> "
+            f"「{_esc(trace.query)}」<span>{_esc(detail)}</span></li>"
+        )
     return (
-        f'<p class="verdict">🔧 {_esc(len(active))} 个竞品仍在活跃维护'
-        f"（共查到 {_esc(len(findings))} 个，最热 {_esc(hottest)}★）—— "
-        f"已有玩家，需要找差异化切口{_esc(partial)}</p>"
+        '<details class="traces"><summary>检索轨迹（可逐条复核）</summary>'
+        f"<ul>{''.join(items)}</ul></details>"
     )
 
 
@@ -456,17 +549,43 @@ def _render_competitors(card: OpportunityCard) -> str:
             meta.append(f'<span class="{"stale" if finding.is_stale else ""}">{_esc(label)}</span>')
         else:
             meta.append("<span>最后活跃：未知</span>")
+        # 平台描述是"这条为什么算竞品"的**唯一依据**，也是人工抽检（M2 验收门）的
+        # 输入。此前它只进判定提示词与出网载荷，本地产物里反而看不到 —— 用户只能
+        # 逐个点开链接自行判断。gap_notes（LLM 归纳的"它没覆盖什么"）两个渠道目前
+        # 都恒为空，留着是为了让将来接上的渠道不必改渲染。
+        #
+        # 判"有没有内容"统一交给 :func:`~xhs_pain_miner.text.text_or_empty` ——
+        # 它一次挡住四件"其实等于没有"的输入：``None``（裸取长度会抛 ``TypeError``）、
+        # 非字符串（``.strip()`` 会抛 ``AttributeError``）、纯空白串、以及
+        # ``strip()`` 拦不住的**不可见字符族** —— 后两者都会渲染出一个**空段落**
+        # （版面上就是"这里本来该有条结论"），只是后者的那个空看不见是怎么来的。
+        # ``description`` 声明成 ``str``，但那是调用方的类型约定、不是运行时保证：
+        # 渲染层对外的承诺是"缺什么少显示什么、绝不抛异常"（见 ``render_html`` 的
+        # Note）。Markdown 的同名分支调的是**同一个函数** —— 同一个判断有两份实现，
+        # 就会有两个版本的正确性（这正是本模块此前踩过的坑）。
+        #
+        # 紧邻的 ``gap_notes`` **没有**跟着走这套判据，它仍是裸真值判断：两个渠道
+        # 目前都恒不产出它（见 ``research.github._to_finding`` / ``appstore``），
+        # 今天的任何真实输入都碰不到那条分支。将来真接上内容时，要照上面这一处
+        # 补齐 —— 只搬真值判断会把上面那几个坑原样带过去。
+        desc = ""
+        text = text_or_empty(finding.description)
+        if text:
+            if len(text) > _COMPETITOR_DESC_CHARS:
+                text = text[: _COMPETITOR_DESC_CHARS - 1] + "…"
+            desc = f'<p class="comp-gap">{_esc(text)}</p>'
         gap = f'<p class="comp-gap">{_esc(finding.gap_notes)}</p>' if finding.gap_notes else ""
         rows.append(
             f'<li><div class="comp-name">{name}'
             f'<span class="comp-src">{_esc(finding.source)}</span></div>'
-            f'<p class="comp-meta">{"".join(meta)}</p>{gap}</li>'
+            f'<p class="comp-meta">{"".join(meta)}</p>{desc}{gap}</li>'
         )
 
     # 没有调研记录时只留结论那句话 —— 空态框和结论说的是同一件事，重复只会稀释重点
     body = f'<ul class="comps">{"".join(rows)}</ul>' if rows else ""
     return (
-        f'<section><h3 class="col-title">竞品调研</h3>{body}{_competitor_verdict(card)}</section>'
+        f'<section><h3 class="col-title">竞品调研</h3>{body}'
+        f"{_competitor_verdict(card)}{_render_traces(card)}</section>"
     )
 
 
@@ -529,7 +648,8 @@ def _render_caliber(card: OpportunityCard, *, weights: dict[str, float] | None) 
     return (
         '<details class="caliber"><summary>评分口径</summary>'
         "<p>机会分 = 100 × Σ(权重 × 因子得分)，因子得分均已归一化到 0-1。"
-        "缺数据的因子取中性值 0.5 —— 0 的含义是「确认这个维度很差」，与「不知道」是两回事。</p>"
+        f"缺数据的因子取中性值 {_num(NEUTRAL, 1)} —— 0 的含义是「确认这个维度很差」，"
+        "与「不知道」是两回事。</p>"
         f"{table}<p>{_esc(note)}</p></details>"
     )
 

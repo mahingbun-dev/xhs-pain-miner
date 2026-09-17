@@ -31,6 +31,18 @@ SourceKind = Literal["note", "comment"]
 CompetitorSource = Literal["github", "appstore", "chrome", "xhs"]
 """竞品调研数据源。"""
 
+ResearchStatus = Literal["ok", "no_competitor", "unsearchable", "failed"]
+"""竞品调研的结论类别。
+
+定义在这里而不是 :mod:`~xhs_pain_miner.research.outcome` 里，是为了让
+:attr:`OpportunityCard.research_status` 用得上它 —— ``models`` 是数据契约层，
+``research`` 反过来依赖它（``outcome.py`` 从本模块 import 它），反向 import 会成环。
+
+四个取值的含义、以及它们对「竞品空白度」的影响，见
+:mod:`~xhs_pain_miner.research.outcome`：那里的 ``classify_status`` 是唯一的
+判定方，本模块只是把它记在卡片上。
+"""
+
 InsightStage = Literal["new", "growing", "stable", "declining"]
 """痛点趋势阶段。"""
 
@@ -367,12 +379,53 @@ class PainCluster:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class QueryTrace:
+    """一次检索的可追溯记录 —— 「结论可逐条复核」这个卖点的落地。
+
+    它回答的是"这个「查证过没有竞品」是怎么得出来的"：实际搜了什么词、发给了哪个
+    平台、平台回了几条、最后留了几条。没有它，结论无法被质疑 —— 而"能被质疑"
+    正是本产品对"免费的 LLM 摘要"的正面防守。
+
+    定义在这里而不是 :mod:`~xhs_pain_miner.research.outcome` 里，理由与
+    :data:`ResearchStatus` 相同：:attr:`OpportunityCard.research_queries` 要用它，
+    而 ``research`` 反过来依赖 ``models``，反向 import 会成环。
+
+    Attributes:
+        query: 实际发给平台的检索词。
+        channel: 检索的渠道。
+        hits: 平台返回的**原始**命中数（相关性过滤之前）。它是区分
+            "查证过确实没有"与"检索不到"的唯一依据，见 ``classify_status``。
+        kept: 相关性过滤后保留的条数。
+        error: 该次查询的失败原因。非 ``None`` 表示**这次没查成**。
+    """
+
+    query: str
+    channel: CompetitorSource
+    hits: int = 0
+    kept: int = 0
+    error: str | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        """这次查询是否真的拿到了平台响应 —— 命中 0 条也算成功。
+
+        把"0 命中"当成失败会让结论退化成"调研失败"，用户就看不到"这个词在该平台
+        检索不到"这条更有价值的信息。
+        """
+        return self.error is None
+
+
 @dataclass(slots=True)
 class CompetitorFinding:
     """一条竞品调研结果。
 
     Attributes:
         last_active: 最近一次提交 / 更新时间。停更的竞品意味着机会，必须如实呈现。
+        description: 该竞品在平台上的**公开描述**（仓库描述 / App 副标题）。
+            它是判定相关性的主要依据 —— 只凭名字无法回答"这个项目是不是真的在
+            解决这个痛点"，而**误报**（把不相关的项目判成竞品）正是 M2 验收门
+            要抓的东西。内容来自公开平台、不含用户原文，因此可随结论一起出网。
         gap_notes: 该竞品没有覆盖到的部分（由 LLM 结合痛点归纳）。
     """
 
@@ -381,6 +434,7 @@ class CompetitorFinding:
     url: str = ""
     stars: int | None = None
     last_active: date | None = None
+    description: str = ""
     gap_notes: str = ""
 
     @property
@@ -398,6 +452,7 @@ class CompetitorFinding:
             "url": self.url,
             "stars": self.stars,
             "last_active": self.last_active.isoformat() if self.last_active else None,
+            "description": self.description,
             "gap_notes": self.gap_notes,
         }
 
@@ -426,17 +481,80 @@ class OpportunityCard:
     score_breakdown: dict[str, float] = field(default_factory=dict)
     feasibility: str = ""
 
-    research_failed: bool = False
-    """这个簇的竞品调研是否**失败**（网络/限流），而不是"查证过没有竞品"。
+    research_status: ResearchStatus = "unsearchable"
+    """这个簇的竞品调研**结论类别**（:data:`ResearchStatus`）。
 
-    两者的含义完全相反：前者是"不知道"，后者是机会分里最强的正面信号。
-    ``competitor_gap`` 因子已经按这个区分给分（失败 → 中性 0.5），但渲染层
-    只看得到分数，只能靠"没有竞品 **且** 空白度恰好为 0.5"反推 —— 那是一条
-    隐式耦合：评分侧哪天在别处也返回中性值，报告就会把"有竞品但没查到"
-    说成"调研未完成"。
+    默认值必须是 ``unsearchable``（"没查成"），**不能**是 ``no_competitor``
+    （"查证过没有竞品"）：后者是机会分里最强的正面信号，一个默认值就能给一个
+    从没查过的方向发满分。缺省构造的卡片（测试、旧产物、将来某个忘了填的调用方）
+    只允许落在保守的一侧。
 
-    显式记下来，反推就不必了。
+    它说的不再是"失败与否"这么一件事，而是一句完整的话："查到竞品" /
+    "查证过，确实没有" / "检索不到，无法判断" / "调研失败"。渲染层据此说四句
+    不同的话 —— 此前它只能靠"没有竞品 **且** 空白度恰好为 0.5"反推"是不是
+    没查成"，而那条反推存在精确碰撞（2 个零 star 的活跃竞品恰好也是 0.5），
+    报告会因此凭空多印一句"本次调研未完成"。
     """
+
+    research_queries: tuple[QueryTrace, ...] = ()
+    """该簇的检索轨迹 —— **本地展示用，刻意不进上传载荷**。
+
+    它是"结论可逐条复核"这个卖点的落地：用户能看到实际搜了什么词、发给了哪个
+    平台、平台回了几条、最后留了几条。没有它，「查证过，没有相关竞品」这个结论
+    无法被质疑 —— 而那正是 M2 存在的理由。
+
+    不进出网载荷的原因与 ``title`` / ``summary`` 那类字段相反：检索词是 **LLM
+    生成的自由文本**，而提示词里带了用户原话（模型可能回抄），所以它属于"必须
+    先过回抄检测"的那一类。M4 若要把轨迹一起上传，必须先调
+    :func:`find_verbatim_overlap`，**不能**直接加进白名单。
+    """
+
+    research_judgement_failed: bool = False
+    """相关性判定本身是否失败（候选未经判定就被保留）。
+
+    与 :attr:`research_status` **正交**：判定失败时全部候选会留在 ``relevant``
+    （保守取舍，见 :mod:`~xhs_pain_miner.research.relevance`），于是有 findings ⇒
+    状态是 ``ok``。但那个 ``ok`` 的含义是"没有被排除"，不是"确认相关"。卡片
+    必须把这件事说出来，否则用户会把一次 LLM 抖动当成"这个方向真的已经有这些
+    竞品"—— 而那正是 M2 验收门要抓的误报。
+    """
+
+    @property
+    def research_failed(self) -> bool:
+        """评分侧的开关：**除了「查到竞品」与「查证过确实没有」，一律按中性值处理**。
+
+        派生而非字段，理由与
+        :attr:`~xhs_pain_miner.research.outcome.ResearchOutcome.research_failed`
+        完全相同：它是从 ``research_status`` 算出来的不变式，一旦允许调用方自己
+        填，就会出现"status 说 unsearchable、这个布尔说 False"的自相矛盾状态 ——
+        而它唯一的后果是把 0 命中那个假空白（M2 修掉的东西）重新翻回空白度 1.0，
+        每张卡片虚高 12.5 分。映射只写一处，就在下面这一行。
+        """
+        return self.research_status not in ("ok", "no_competitor")
+
+    @property
+    def research_incomplete(self) -> bool:
+        """竞品清单是否**可能不全**。与 :attr:`research_failed` 是两件事，可互相独立。
+
+        * **找到了竞品、但同渠道内另一条检索词被限流** → ``research_failed`` 为
+          ``False``（空白度按找到的竞品算，这是刻意的：已经查到真实竞品，就不该
+          断言"没查成"），但清单**确实不完整** —— 漏掉的那次里可能有更强势的对手。
+        * **相关性判定失败** → 全部候选被保留，``research_failed`` 也是 ``False``，
+          而"未经判定"同样意味着这份清单不能当完整结论看。
+
+        渲染层原本只判这两个布尔，于是第一种情形下卡片一个字都不提。而
+        ``render/html.py`` 里那段注释恰恰写着这两种情形"**都必须说**" —— 说明意图
+        本就如此，只是判据没覆盖到。这个属性就是把那份意图补成代码。
+
+        派生而非字段，理由同 :attr:`research_failed`：它是从已有字段算出来的不变式。
+        放在这里而不是各渲染器里，是为了让两个渲染器共用一处定义、不会各写一份而
+        慢慢漂移（这正是它出现的原因）。
+        """
+        return (
+            self.research_failed
+            or self.research_judgement_failed
+            or any(not trace.succeeded for trace in self.research_queries)
+        )
 
     @property
     def has_active_competitor(self) -> bool:
@@ -458,6 +576,12 @@ class OpportunityCard:
           结构性剔除拦不住它。任何真正把载荷送出本机的路径（M4 的众包上传）
           **必须**先用 :func:`find_verbatim_overlap` 对这些字段做回抄检查。
 
+        ``research_status`` 与 ``competitors[].description`` 属于**结构性安全**的
+        那一类：前者是四个固定取值之一（没有自由文本的余地），后者是平台上的公开
+        描述（App 商店文案 / 仓库描述），都不含用户原文。竞品描述必须随结论一起
+        出网 —— 它是"这条竞品为什么算相关"的唯一依据，砍掉它，众包结论就没法被
+        复核。
+
         新增字段前请先确认它不包含任何可识别到个人的信息，并补一条守卫测试。
         """
         return {
@@ -466,6 +590,7 @@ class OpportunityCard:
             "score": round(self.score, 1),
             "score_breakdown": {k: round(v, 3) for k, v in self.score_breakdown.items()},
             "feasibility": self.feasibility,
+            "research_status": self.research_status,
             "pain": self.pain.to_public_dict(),
             "competitors": [c.to_public_dict() for c in self.competitors],
         }

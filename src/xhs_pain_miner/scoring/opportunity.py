@@ -64,6 +64,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from xhs_pain_miner.models import CompetitorFinding, Evidence, OpportunityCard, PainCluster
+from xhs_pain_miner.research.outcome import ResearchOutcome
 
 FACTOR_NAMES = (
     "pain_strength",
@@ -151,6 +152,19 @@ ACTIVE_COMPETITOR_COUNT_SCORE = (0.60, 0.50, 0.40)
 
 ACTIVE_COMPETITOR_HEAT_PENALTY = 0.5
 """最热的活跃竞品最多还能把空白度再砍掉一半。"""
+
+_INCONCLUSIVE_LABELS: Mapping[str, str] = {
+    "unsearchable": "检索不到 / 没有可用的检索词",
+    "failed": "调用失败",
+}
+"""汇总警告里对"没得出结论"的两类说法。
+
+**刻意不用** :data:`~xhs_pain_miner.research.outcome.STATUS_LABELS`：那里的
+``unsearchable`` 写成"该渠道检索不到相关内容"，而它同时覆盖"这次压根没有可用的
+检索词"（检索词生成失败、调研被关闭）—— 那种情况下我们一个检索词都没发出去，
+说"检索不到"是一句失实的话。卡片上那句话按同一口径写（见
+:func:`~xhs_pain_miner.render.html._competitor_verdict`）。
+"""
 
 WEIGHT_WARN_EPSILON = 0.05
 """归一化后的权重与默认权重相差超过该值时产生警告。
@@ -608,22 +622,25 @@ def _direction_title(cluster: PainCluster, keyword: str, *, template: str | None
 def build_card(
     cluster: PainCluster,
     *,
-    findings: Sequence[CompetitorFinding],
+    outcome: ResearchOutcome | None = None,
     weights: ScoreWeights,
     keyword: str,
     max_size: int,
-    research_failed: bool = False,
     direction_template: str | None = None,
 ) -> OpportunityCard:
     """为单个簇构造机会卡片。
 
     Args:
         cluster: 痛点簇。
-        findings: 该簇的竞品调研结果。
+        outcome: 该簇的竞品调研**结论**。``None`` 表示没有做过调研，等价于
+            ``ResearchOutcome()``（``unsearchable`` / 无竞品）—— 即按中性值计分。
+            本函数的入参是**结论**而不是"竞品列表 + 一个布尔"，是为了让
+            ``没查成`` 无法被写成 ``没有竞品``：竞品列表为空时，含义完全取决于
+            那个没有被传进来的状态；把它作为入参的一部分，调用方就没有"忘了传"
+            的余地（详见 :class:`~xhs_pain_miner.models.OpportunityCard.research_status`）。
         weights: 因子权重。
         keyword: 品类关键词。
         max_size: 归一化基准（**参与机会评估**的簇里最大的 size）。
-        research_failed: 该簇的竞品调研是否失败。
         direction_template: 标题用的方向模板；``None`` 时按痛点名推导。
             **只有** :func:`build_cards` 需要传它 —— 标题唯一性是整份报告的性质，
             单张卡片看不到自己的兄弟（见该函数里的"标题唯一化"一节）。
@@ -637,12 +654,20 @@ def build_card(
         ``title`` 不得直接等于 ``cluster.label`` —— 卡片标题是"可做的产品方向"，
         痛点名是"问题描述"，两者不是一回事。
     """
+    # 缺省的结论就是"没查成"。这里**不要**自己写 status → 布尔的映射：
+    # ``research_failed`` 是 :class:`~xhs_pain_miner.research.outcome.ResearchOutcome`
+    # 上的一条不变式，最自然的写法 ``status == "failed"`` 会把 ``unsearchable``
+    # 漏掉 —— 那正是 M2 修掉的假空白，漏掉它等于把 ``classify_status`` 做对的事
+    # 原样撤销（每张卡片虚高 12.5 分）。
+    research = outcome if outcome is not None else ResearchOutcome()
     normalized = weights.normalized()
     breakdown = {
         "pain_strength": pain_strength(cluster),
         "mention_volume": mention_volume(cluster, max_size=max_size),
         "growth_trend": growth_trend(cluster),
-        "competitor_gap": competitor_gap(findings, research_failed=research_failed),
+        "competitor_gap": competitor_gap(
+            research.findings, research_failed=research.research_failed
+        ),
         "feasibility": feasibility_score(cluster),
     }
     factor_weights = normalized.to_dict()
@@ -651,13 +676,18 @@ def build_card(
         id=f"card-{cluster.id}",
         title=_direction_title(cluster, keyword, template=direction_template),
         pain=cluster,
-        competitors=list(findings),
+        competitors=list(research.findings),
         score=round(_clamp(weighted * 100.0, 0.0, 100.0), 1),
         score_breakdown=breakdown,
         feasibility=_feasibility_text(cluster),
-        # 显式带出去：渲染层若只能靠"无竞品 且 空白度恰为 0.5"反推，那是隐式耦合，
-        # 评分侧哪天在别处也返回中性值，报告就会把"没查成"说成"没有竞品"。
-        research_failed=research_failed,
+        # 显式带出去：渲染层若只能靠"无竞品 且 空白度恰为 0.5"反推，那是隐式耦合 ——
+        # 评分侧哪天在别处也返回中性值（实测"2 个零 star 的活跃竞品"恰好也是 0.5），
+        # 报告就会多印一句"本次调研未完成"。结论的类别只能由结论自己说。
+        research_status=research.status,
+        # 检索轨迹与"未经判定"标记同理，都是**结论自带**的信息：「结论可逐条复核」
+        # 这个卖点靠前者落地，「这些竞品没验过」靠后者说清。
+        research_queries=research.queries,
+        research_judgement_failed=research.judgement_failed,
     )
 
 
@@ -680,10 +710,9 @@ def _weights_warning(weights: ScoreWeights, normalized: ScoreWeights) -> str | N
 def build_cards(
     clusters: Sequence[PainCluster],
     *,
-    findings_by_cluster: Mapping[str, Sequence[CompetitorFinding]],
+    outcomes: Mapping[str, ResearchOutcome] | None = None,
     weights: ScoreWeights | None = None,
     keyword: str = "",
-    failed_clusters: Sequence[str] = (),
     min_size: int = 1,
     include_noise: bool = False,
 ) -> tuple[list[OpportunityCard], list[str]]:
@@ -691,10 +720,11 @@ def build_cards(
 
     Args:
         clusters: 痛点簇（已命名）。
-        findings_by_cluster: ``cluster.id`` → 竞品列表。
+        outcomes: ``cluster.id`` → 该簇的竞品调研**结论**。**缺项等于"没查过"**
+            （按中性值计），而不是"查证过没有竞品" —— 后者是机会分里最强的正面
+            信号，不该由一个缺失的字典键发出来。
         weights: 因子权重，``None`` 时用默认。
         keyword: 品类关键词。
-        failed_clusters: 竞品调研失败的簇 id 集合。
         min_size: 小于该规模的簇不生成卡片。
         include_noise: 是否为「长尾低频痛点」桶（``is_noise``）也生成卡片。
             **默认 ``False``**：那个桶装的是"没能归入任何已知痛点的发言"，
@@ -726,7 +756,7 @@ def build_cards(
     if weight_warning:
         warnings.append(weight_warning)
 
-    failed = set(failed_clusters)
+    research = outcomes or {}
     # 归一化基准取**参与机会评估**的簇的最大 size：
     # * 与 min_size 过滤解耦 —— 调用方调整过滤阈值时，已经能进报告的卡片分数
     #   不该跟着变（否则两次运行没法对比）。这条是**构造成立**的：max 永远落在
@@ -753,23 +783,38 @@ def build_cards(
     cards = [
         build_card(
             cluster,
-            findings=findings_by_cluster.get(cluster.id, ()),
+            outcome=research.get(cluster.id),
             weights=normalized,
             keyword=keyword,
             max_size=max_size,
-            research_failed=cluster.id in failed,
             direction_template=_effective_direction_template(cluster, shared_templates),
         )
         for cluster in selected
     ]
     cards.sort(key=lambda card: (-card.score, -card.pain.size, card.id))
 
-    failed_hit = sum(1 for cluster in selected if cluster.id in failed)
-    if failed_hit:
-        warnings.append(
-            f"{failed_hit} 个痛点的竞品调研失败，其「竞品空白度」按中性值 {NEUTRAL} 计 "
-            "—— 这不代表该方向没有竞品，只是这次没查成"
-        )
+    # ★ 合并冲突的取舍：这一块两侧都改了，不是"两边都留"。
+    #
+    # main（PR #2，提及量绝对锚点）保留的是旧的 `failed_hit` 警告，它数的是调用方传进来
+    # 的 `failed: set[str]`；M2 已把那个参数换成 `outcomes`，并把这句警告换成了
+    # :func:`_unresolved_warning`。所以这里**只保留 M2 侧**——旧的写法引用一个已不存在的
+    # 变量，留着就是 `NameError`。
+    #
+    # ⚠️ 早先这里写过"新的 `_unresolved_warning` 是旧 `failed_hit` 的超集"，那是**错的**，
+    # 独立验证用穷举口径对照推翻了它：旧 `failed` 集合还覆盖一条可达路径 ——
+    # **同一渠道内前一条检索词查到了相关竞品、后一条被限流**（``_search_channels`` 在渠道内
+    # 首次失败即 ``break``，前面已拿到的 findings 会保留）。那条路径下 ``classify_status``
+    # 因 findings 非空判成 ``ok``、``research_failed`` 为 ``False``，于是**不进**
+    # ``_unresolved_warning``。旧口径会把它算进 ``failed`` 并退回中性值。
+    #
+    # 这条差异是**有意保留**的（评分口径不动）：既然已经拿到了真实竞品，就不该断言"没查成"。
+    # 但它丢掉的那条"结果不完整"提示由 :func:`~xhs_pain_miner.research.outcome.warning_for`
+    # 补回（见那里 ``ok`` 分支的说明），否则会出现"轨迹说必须按中性值、分数却不是中性"的
+    # 自相矛盾产物。
+    unresolved = [card for card in cards if card.research_failed]
+    if unresolved:
+        warnings.append(_unresolved_warning(unresolved))
+
     # 语料规模必须显式说出来：绝对项生效后，薄语料里的头名不再是满分，而用户看到
     # 「提及量 0.65」时最自然的解读是"算错了"。这条提示把"证据量不足"这个**事实**
     # 摆出来，而不是让它变成一个沉默的低分。
@@ -785,3 +830,22 @@ def build_cards(
             "卡片上的「可行度」会留空"
         )
     return cards, warnings
+
+
+def _unresolved_warning(cards: Sequence[OpportunityCard]) -> str:
+    """汇总"竞品调研没有得出结论"的卡片。
+
+    按**结论类别**分组报数，而不是笼统地说"调研失败"：``unsearchable``（检索不到
+    或没搜）与 ``failed``（调用失败）对用户是两件不同的事 —— 前者可以换个说法再搜
+    一次，后者只能等额度或网络恢复。把它们说成同一句话，用户就无从决定下一步。
+    """
+    counts = Counter(card.research_status for card in cards)
+    detail = "、".join(
+        f"{_INCONCLUSIVE_LABELS.get(status, status)} {count} 个"
+        for status, count in sorted(counts.items())
+    )
+    return (
+        f"{len(cards)} 个痛点的竞品调研没有得出结论（{detail}），"
+        f"其「竞品空白度」按中性值 {NEUTRAL} 计 —— 这不代表这些方向没有竞品，"
+        "只是这次没查成"
+    )
