@@ -44,6 +44,7 @@ from typing import Any
 from xhs_pain_miner.models import Evidence, MiningResult, OpportunityCard
 from xhs_pain_miner.research.outcome import STATUS_LABELS
 from xhs_pain_miner.scoring.opportunity import FACTOR_LABELS, FACTOR_NAMES, NEUTRAL, ScoreWeights
+from xhs_pain_miner.text import text_or_empty
 
 DEFAULT_TITLE = "机会卡片"
 
@@ -543,10 +544,27 @@ def _render_competitors(card: OpportunityCard) -> str:
         # 输入。此前它只进判定提示词与出网载荷，本地产物里反而看不到 —— 用户只能
         # 逐个点开链接自行判断。gap_notes（LLM 归纳的"它没覆盖什么"）两个渠道目前
         # 都恒为空，留着是为了让将来接上的渠道不必改渲染。
-        shown = finding.description
-        if len(shown) > _COMPETITOR_DESC_CHARS:
-            shown = shown[: _COMPETITOR_DESC_CHARS - 1] + "…"
-        desc = f'<p class="comp-gap">{_esc(shown)}</p>' if shown else ""
+        #
+        # 判"有没有内容"统一交给 :func:`~xhs_pain_miner.text.text_or_empty` ——
+        # 它一次挡住四件"其实等于没有"的输入：``None``（裸取长度会抛 ``TypeError``）、
+        # 非字符串（``.strip()`` 会抛 ``AttributeError``）、纯空白串、以及
+        # ``strip()`` 拦不住的**不可见字符族** —— 后两者都会渲染出一个**空段落**
+        # （版面上就是"这里本来该有条结论"），只是后者的那个空看不见是怎么来的。
+        # ``description`` 声明成 ``str``，但那是调用方的类型约定、不是运行时保证：
+        # 渲染层对外的承诺是"缺什么少显示什么、绝不抛异常"（见 ``render_html`` 的
+        # Note）。Markdown 的同名分支调的是**同一个函数** —— 同一个判断有两份实现，
+        # 就会有两个版本的正确性（这正是本模块此前踩过的坑）。
+        #
+        # 紧邻的 ``gap_notes`` **没有**跟着走这套判据，它仍是裸真值判断：两个渠道
+        # 目前都恒不产出它（见 ``research.github._to_finding`` / ``appstore``），
+        # 今天的任何真实输入都碰不到那条分支。将来真接上内容时，要照上面这一处
+        # 补齐 —— 只搬真值判断会把上面那几个坑原样带过去。
+        desc = ""
+        text = text_or_empty(finding.description)
+        if text:
+            if len(text) > _COMPETITOR_DESC_CHARS:
+                text = text[: _COMPETITOR_DESC_CHARS - 1] + "…"
+            desc = f'<p class="comp-gap">{_esc(text)}</p>'
         gap = f'<p class="comp-gap">{_esc(finding.gap_notes)}</p>' if finding.gap_notes else ""
         rows.append(
             f'<li><div class="comp-name">{name}'

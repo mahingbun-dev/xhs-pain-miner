@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import cast
 
 from xhs_pain_miner.models import (
     CompetitorFinding,
@@ -202,6 +203,27 @@ class TestHtmlEscaping:
             source="github", name="tool", url="https://e.test/x", gap_notes=XSS_SCRIPT
         )
         _assert_payload_is_inert(render_html(make_result(cards=[make_card(competitors=[finding])])))
+
+    def test_script_in_competitor_description_is_escaped(self):
+        """平台描述是**第三方自由文本**（GitHub 仓库描述 / App Store 商店文案），
+        由平台用户自己填 —— 它此前只进判定提示词，进渲染层就是新开的一处攻击面。
+        """
+        finding = CompetitorFinding(
+            source="appstore", name="tool", url="https://e.test/x", description=XSS_SCRIPT
+        )
+        document = render_html(make_result(cards=[make_card(competitors=[finding])]))
+        _assert_payload_is_inert(document)
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in document
+
+    def test_img_onerror_in_competitor_description_is_escaped(self):
+        """属性逃逸必须失败：描述里的引号与尖括号都要变成实体。"""
+        finding = CompetitorFinding(
+            source="appstore", name="tool", url="https://e.test/x", description=XSS_IMG
+        )
+        document = render_html(make_result(cards=[make_card(competitors=[finding])]))
+        _assert_payload_is_inert(document)
+        assert 'onerror="alert(1)"' not in document
+        assert "&quot;" in document
 
     def test_script_in_competitor_url_cannot_break_out_of_href(self):
         finding = CompetitorFinding(
@@ -560,6 +582,32 @@ class TestMarkdownEscaping:
         assert "<script" not in markdown
         assert "&lt;script&gt;" in markdown
 
+    def test_competitor_description_pipe_and_hash_are_escaped(self):
+        """竞品描述是自由文本，里面一个 ``|`` 或 ``#`` 就够撑断/改写结构。"""
+        finding = CompetitorFinding(
+            source="appstore", name="tool", url="https://e.test/x", description="假白|泛白#1"
+        )
+        markdown = render_markdown(make_result(cards=[make_card(competitors=[finding])]))
+        assert "假白\\|泛白\\#1" in markdown
+
+    def test_competitor_description_inline_html_is_escaped(self):
+        """``<tag>`` 是 Markdown 的行内 HTML，GitHub / Notion 都会渲染它。"""
+        finding = CompetitorFinding(
+            source="appstore", name="tool", url="https://e.test/x", description=XSS_SCRIPT
+        )
+        markdown = render_markdown(make_result(cards=[make_card(competitors=[finding])]))
+        assert "<script" not in markdown
+        assert "&lt;script&gt;" in markdown
+
+    def test_competitor_description_newline_is_flattened(self):
+        """裸换行会从引用块里逃出去 —— 商店文案恰恰大量使用 ``\\n\\n`` 排版。"""
+        finding = CompetitorFinding(
+            source="appstore", name="tool", url="https://e.test/x", description="第一行\n第二行"
+        )
+        markdown = render_markdown(make_result(cards=[make_card(competitors=[finding])]))
+        assert "第一行 第二行" in markdown
+        assert "\n第二行" not in markdown
+
     def test_javascript_url_is_not_linked(self):
         finding = CompetitorFinding(source="github", name="sneaky", url="javascript:alert(1)")
         markdown = render_markdown(make_result(cards=[make_card(competitors=[finding])]))
@@ -800,3 +848,200 @@ class TestCompetitorDescriptions:
         document = render_html(make_result(cards=[card]))
         assert long_text not in document
         assert "描" * 159 + "…" in document
+
+    def test_markdown_long_description_is_truncated(self):
+        """HTML 截断了 Markdown 也必须截断 —— 同一个字段在两种产物上要给同样的口径，
+        否则"贴进 issue 的那一份"和"发给别人的那一份"会不一样长。
+        """
+        long_text = "描" * 900
+        card = make_card(
+            competitors=[
+                CompetitorFinding(
+                    source="appstore", name="x", url="https://e.test/x", description=long_text
+                )
+            ],
+            research_status="ok",
+        )
+        document = render_markdown(make_result(cards=[card]))
+        assert long_text not in document
+        assert "描" * 159 + "…" in document
+
+    def test_truncation_length_matches_the_judgement(self):
+        """两个渲染器的截断长度都必须**等于判定用的常量**。
+
+        这条钉的是口径本身而不是字面量 160：判定看多少字、人就该看到多少字。改了
+        判定那边却忘了改渲染，用户复核时会发现"报告里的描述不足以判出这个结论"——
+        而那是这个字段存在的全部意义。
+        """
+        from xhs_pain_miner.render import html as html_render
+        from xhs_pain_miner.render import markdown as markdown_render
+        from xhs_pain_miner.research.relevance import _MAX_DESCRIPTION_CHARS
+
+        assert html_render._COMPETITOR_DESC_CHARS == _MAX_DESCRIPTION_CHARS
+        assert markdown_render._COMPETITOR_DESC_CHARS == _MAX_DESCRIPTION_CHARS
+
+    def test_invisible_chars_inside_a_description_survive_rendering(self):
+        """渲染层只判"有没有内容"，**绝不改写正文** —— 正文里的不可见字符必须原样出来。
+
+        这是本组最容易漏的一条：上面几条只钉 ``text_or_empty`` 那一层，而
+        "渲染器把清洗后的文本印出去"（顺手把 ZWJ 删掉）能让它们**全部保持绿色**。
+        实测过：把两个渲染器都改成渲染清洗后的文本，``test_render.py`` 88 条全绿。
+
+        代价是真实的：``👨\u200d👩\u200d👧`` 里的 ZWJ 被删掉，一个家庭 emoji 会散成
+        三个人；双向控制符被删掉，阿拉伯语 / 希伯来语的显示顺序会变。
+        """
+        zwj = "\u200d"
+        rlm = "\u200f"
+        cases = [
+            (f"\U0001f468{zwj}\U0001f469{zwj}\U0001f467 家庭", zwj, 2),
+            (f"{rlm}שלום{rlm}", rlm, 2),
+        ]
+        for description, marker, expected in cases:
+
+            def card(text: str = description) -> OpportunityCard:
+                return make_card(
+                    competitors=[
+                        CompetitorFinding(
+                            source="appstore",
+                            name="x",
+                            url="https://e.test/x",
+                            description=text,
+                        )
+                    ],
+                    research_status="ok",
+                )
+
+            for product in (
+                render_html(make_result(cards=[card()])),
+                render_markdown(make_result(cards=[card()])),
+            ):
+                assert product.count(marker) >= expected, (
+                    f"渲染层丢掉了正文里的 {marker!r} —— 正文被改写了"
+                )
+
+
+class TestCompetitorDescriptionMissing:
+    """缺描述时**少显示一行**，不出现任何占位文案、也不留空段落。
+
+    占位（"（无描述）"）比不显示更糟：它看起来像一条结论，读者会以为"平台给了、
+    但内容是空的"，而实际情况是"这个渠道根本没提供这个字段"—— 两件事的含义不同，
+    报告不该把它们说成同一件。空段落同理：一个空的 ``comp-gap`` / 空的引用块行，
+    在版面上就是"这里本来该有条结论"。缺什么少什么，是渲染层对外的承诺。
+
+    "缺"有八种写法，**每一条都要撞**：空串、``None``、只有空白的串、只有换行的串、
+    非字符串（列表 / 字典），以及**只由不可见字符组成**的串（单个零宽空格、以及
+    一串混在一起的零宽字符 / ZWJ / BOM）。上游 ``_describe`` 会把前几族都压成空串，
+    但那是对接方的行为、不是渲染层可以依赖的保证 —— 只在空串上测，等于没测
+    ``None``（崩溃点）、纯空白（空段落）与不可见字符（看不见的空段落）。
+    """
+
+    PLACEHOLDERS = ("（无描述）", "无描述", "暂无描述", "（平台未提供）", "未提供")
+    MISSING: tuple[object, ...] = (
+        "",
+        None,
+        "   ",
+        "\t\n",
+        ["a"],
+        {"k": "v"},
+        "\u200b",  # 零宽空格 —— str.strip() 拦不住的那一族
+        "\u200b\u200d\ufeff",  # 一串不可见字符
+    )
+
+    def _card(self, description: object = "") -> OpportunityCard:
+        finding = CompetitorFinding(
+            source="appstore", name="美丽修行", url="https://apps.apple.com/cn/app/x"
+        )
+        finding.description = cast("str", description)
+        return make_card(competitors=[finding], research_status="ok")
+
+    def _assert_every_family_is_still_covered(self) -> None:
+        """守卫这一组测试的**输入集合本身**。
+
+        下面几条测试都是"对 ``MISSING`` 逐项撞"，所以 ``MISSING`` 一旦被削短或换掉，
+        它们不会红 —— 它们只是**静默变弱**，什么都不再证明。光钉数量不够：
+        八项全换成 ``1..8`` 长度照样达标，而 ``None`` / 纯空白 / 非字符串 / 不可见
+        字符四族会一起失去覆盖。所以钉的是"这四族都还在"。
+        """
+        assert any(m is None for m in self.MISSING), "MISSING 里没有 None —— 崩溃点失去覆盖"
+        assert sum(1 for m in self.MISSING if isinstance(m, str) and not m.strip()) >= 2, (
+            "MISSING 里的空白串不足两条 —— 空段落失去覆盖"
+        )
+        assert any(not isinstance(m, str) and m is not None for m in self.MISSING), (
+            "MISSING 里没有非字符串 —— repr 泄漏失去覆盖"
+        )
+        assert any(isinstance(m, str) and m.strip() for m in self.MISSING), (
+            "MISSING 里没有看不见但非空白的串 —— 不可见字符族失去覆盖"
+        )
+
+    def test_html_has_no_placeholder(self):
+        self._assert_every_family_is_still_covered()
+        for missing in self.MISSING:
+            document = render_html(make_result(cards=[self._card(description=missing)]))
+            for placeholder in self.PLACEHOLDERS:
+                assert placeholder not in document, (
+                    f"description={missing!r} 时 HTML 里出现了占位文案：{placeholder}"
+                )
+
+    def test_markdown_has_no_placeholder(self):
+        self._assert_every_family_is_still_covered()
+        for missing in self.MISSING:
+            markdown = render_markdown(make_result(cards=[self._card(description=missing)]))
+            for placeholder in self.PLACEHOLDERS:
+                assert placeholder not in markdown, (
+                    f"description={missing!r} 时 Markdown 里出现了占位文案：{placeholder}"
+                )
+
+    def test_html_shows_one_line_fewer(self):
+        """少的是**那一行本身**，不是留一个空段落占位。"""
+        self._assert_every_family_is_still_covered()
+        with_desc = render_html(make_result(cards=[self._card(description="有描述")]))
+        for missing in self.MISSING:
+            without = render_html(make_result(cards=[self._card(description=missing)]))
+            assert with_desc.count('class="comp-gap"') == without.count('class="comp-gap"') + 1, (
+                f"description={missing!r} 时少的不止一行（或多了个空段落）"
+            )
+            assert '<p class="comp-gap"></p>' not in without
+
+    def test_markdown_shows_one_line_fewer(self):
+        self._assert_every_family_is_still_covered()
+        with_desc = render_markdown(make_result(cards=[self._card(description="有描述")]))
+        for missing in self.MISSING:
+            without = render_markdown(make_result(cards=[self._card(description=missing)]))
+            assert with_desc.count("\n  > ") == without.count("\n  > ") + 1, (
+                f"description={missing!r} 时少的不止一行（或多了个空引用行）"
+            )
+
+    def test_every_missing_spelling_renders_like_the_empty_one(self):
+        """空串 / ``None`` / 纯空白 / 纯换行 / 非字符串，五种都必须产出**逐字节相同**的产物。
+
+        只断言"不崩"太松：崩溃之外，"渲染出一个空段落""印了占位""把 stars 或链接
+        弄丢了""顺序变了"都能从它下面溜过去。逐字节相等一次排除全部 —— 而且它把
+        HTML 与 Markdown 钉成同一行为，不会再出现"一个崩一个不崩"。
+        """
+        # 循环体跑的是 ``MISSING[1:]``：``MISSING`` 若被削到只剩一项，下面两条断言
+        # 一次都不执行、这条测试会**静默全绿**。先钉住输入集合本身。
+        self._assert_every_family_is_still_covered()
+
+        expected_html = render_html(make_result(cards=[self._card()]))
+        expected_markdown = render_markdown(make_result(cards=[self._card()]))
+        for missing in self.MISSING[1:]:
+            result = make_result(cards=[self._card(description=missing)])
+            assert render_html(result) == expected_html, f"description={missing!r} 的 HTML 产物不同"
+            assert render_markdown(result) == expected_markdown, (
+                f"description={missing!r} 的 Markdown 产物不同"
+            )
+
+    def test_none_description_does_not_crash_html(self):
+        """``None`` 也必须不崩。
+
+        ``description`` 声明成 ``str``，但那是**调用方的类型约定，不是运行时保证**：
+        渲染层对外的承诺是"缺什么少显示什么，而不是抛异常让用户拿不到报告"（见
+        ``render_html`` 的 Note）。这条把 HTML 与 Markdown 的行为钉成一致 —— 修之前
+        同一个字段在 HTML 上抛 ``TypeError``、在 Markdown 上安然渲染。
+        """
+        document = render_html(make_result(cards=[self._card(description=None)]))
+        assert "美丽修行" in document
+
+    def test_none_description_does_not_crash_markdown(self):
+        markdown = render_markdown(make_result(cards=[self._card(description=None)]))
+        assert "美丽修行" in markdown
