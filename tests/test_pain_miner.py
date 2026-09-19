@@ -486,12 +486,16 @@ class TestMineCommand:
     provider，而 CI 里没有 API Key。
     """
 
-    def test_missing_api_key_gives_readable_error(self, runner: CliRunner):
+    def test_missing_api_key_gives_readable_error(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ):
         """没有 API Key 时必须**立刻**给出可操作的提示。
 
         必须是快速失败：先跑一遍采集再报缺 Key，用户会白等一场，还会误以为
         是采集环节出了问题。
         """
+        # 环境变量优先于 .env 文件 —— 置空才能测"无 Key"分支（本地配了 .env 会假红）
+        monkeypatch.setenv("LLM_API_KEY", "")
         result = runner.invoke(main, ["mine", "-k", "防晒霜", "--backend", "fixture", "-n", "5"])
 
         assert result.exit_code == 2, _combined(result)
@@ -535,7 +539,10 @@ class TestMineCommand:
 class TestDoctorCommand:
     """``doctor`` 子命令。"""
 
-    def test_fails_without_api_key(self, runner: CliRunner):
+    def test_fails_without_api_key(self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch):
+        # 环境变量优先级高于 .env 文件：显式置空才能保证"无 Key"分支被测到，
+        # 否则任何本地配了 .env 的开发者跑这条都会假红（实测踩过）。
+        monkeypatch.setenv("LLM_API_KEY", "")
         result = runner.invoke(main, ["doctor"])
         assert result.exit_code == 2
         assert "LLM" in result.output
