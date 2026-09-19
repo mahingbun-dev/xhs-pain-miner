@@ -495,6 +495,7 @@ def _pick_evidences(members: Sequence[TextUnit]) -> list[Evidence]:
             source=unit.source,
             likes=unit.likes,
             note_hash=unit.note_hash,
+            note_url=unit.note_url,
             created_at=unit.created_at,
         )
         for unit in ordered[:MAX_EVIDENCES]

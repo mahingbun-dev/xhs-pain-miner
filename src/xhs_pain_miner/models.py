@@ -222,6 +222,12 @@ class TextUnit:
 
     note_id: str = ""
     note_hash: str = ""
+    note_url: str = ""
+    """所属笔记的原帖链接（仅真实采集后端会填充，fixture 落在 .invalid 保留域）。
+
+    随单元一路传到 ``Evidence``，最终渲染成本地报告里的「查看原文」链接 ——
+    M3① 验收门"证据链能点开回到真实笔记"的数据来源。
+    """
     created_at: datetime | None = None
     """该文本的发布时间（评论取评论时间，笔记取笔记发布时间）。
 
@@ -325,6 +331,13 @@ class Evidence:
     source: SourceKind
     likes: int = 0
     note_hash: str = ""
+    note_url: str = ""
+    """该条证据所属笔记的原帖链接（真实后端是含 xsec_token 的可打开地址）。
+
+    **只用于本地报告的「查看原文」链接** —— 证据链"能点开回到真实笔记"的判定
+    就靠它。与本类其它字段一样，``Evidence`` 整块不进 ``to_public_dict``，
+    这个 URL 同样结构性不出网。
+    """
     created_at: datetime | None = None
     """该证据的发布时间（评论取评论时间，笔记取笔记发布时间）。
 

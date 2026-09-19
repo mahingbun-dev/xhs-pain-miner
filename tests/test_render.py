@@ -197,6 +197,28 @@ class TestHtmlEscaping:
         _assert_payload_is_inert(document)
         assert "&lt;script&gt;" in document
 
+    def test_evidence_note_url_renders_view_original_link(self):
+        """M3① 判定依赖：真实后端的证据要能点开回到原帖（含 xsec_token 的完整链接）。"""
+        evidence = Evidence(
+            text="我是脸部涂兰蔻菁纯防晒",
+            source="comment",
+            likes=5,
+            note_url=(
+                "https://www.xiaohongshu.com/explore/6a73de8c000000002402fd04"
+                "?xsec_token=AB0qvH2w=&xsec_source=pc_search"
+            ),
+        )
+        document = render_html(make_result(cards=[make_card(make_cluster(evidences=[evidence]))]))
+        assert 'href="https://www.xiaohongshu.com/explore/6a73de8c' in document
+        assert "查看原文" in document
+        assert 'rel="noopener noreferrer nofollow"' in document
+
+    def test_evidence_without_note_url_has_no_dead_link(self):
+        """fixture / 图片派生的证据没有原帖链接 —— 缺什么少显示什么，不给死链接。"""
+        evidence = Evidence(text="没有链接的证据", source="note", likes=1)
+        document = render_html(make_result(cards=[make_card(make_cluster(evidences=[evidence]))]))
+        assert "查看原文" not in document
+
     def test_script_in_competitor_name_is_escaped(self):
         finding = CompetitorFinding(source="github", name=XSS_SCRIPT, url="https://e.test/x")
         _assert_payload_is_inert(render_html(make_result(cards=[make_card(competitors=[finding])])))

@@ -384,6 +384,10 @@ def _render_evidence(card: OpportunityCard, *, max_evidence: int) -> str:
             text = _date_text(stamp)
             ago = _ago_text(stamp)
             meta.append(f"<span>{_esc(text)}{f'（{_esc(ago)}）' if ago else ''}</span>")
+        if evidence.note_url:
+            # 证据链的判定标准是"每条结论都能点回原文"（M3① 验收门）：
+            # 真实后端的证据带原帖链接，fixture 的 .invalid 域会被 _link 降级成纯文本
+            meta.append(_link(evidence.note_url, "查看原文"))
         items.append(
             '<li><p class="ev-text">{text}</p><p class="ev-meta">{meta}</p></li>'.format(
                 text=_esc(evidence.text), meta="".join(meta)
