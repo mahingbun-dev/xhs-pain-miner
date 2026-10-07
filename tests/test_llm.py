@@ -18,6 +18,11 @@ from xhs_pain_miner.llm.base import (
 )
 from xhs_pain_miner.llm.factory import build_provider, describe_protocol
 
+# 假凭据统一走常量间接引用：参数位置不出现密钥形状的字面量，
+# 且断言与构造用的是同一个值。
+_FAKE_LLM = "test-llm"
+_FAKE_VLM = "test-vision"
+
 _MANAGED_ENV = (
     "LLM_API_KEY",
     "DEEPSEEK_API_KEY",
@@ -107,17 +112,17 @@ class TestProviderFactory:
     """协议分发。"""
 
     def test_chat_protocol(self):
-        provider = build_provider(_settings(llm_protocol="chat", llm_api_key="sk-test"))
+        provider = build_provider(_settings(llm_protocol="chat", llm_api_key=_FAKE_LLM))
         assert provider.name == "chat"
         provider.close()
 
     def test_responses_protocol(self):
-        provider = build_provider(_settings(llm_protocol="responses", llm_api_key="sk-test"))
+        provider = build_provider(_settings(llm_protocol="responses", llm_api_key=_FAKE_LLM))
         assert provider.name == "responses"
         provider.close()
 
     def test_messages_protocol(self):
-        provider = build_provider(_settings(llm_protocol="messages", llm_api_key="sk-test"))
+        provider = build_provider(_settings(llm_protocol="messages", llm_api_key=_FAKE_LLM))
         assert provider.name == "messages"
         provider.close()
 
@@ -125,13 +130,13 @@ class TestProviderFactory:
         """``purpose="vision"`` 时必须走 VLM 那套配置，否则 --deep 会错误地打到文本模型。"""
         settings = _settings(
             llm_model="deepseek-chat",
-            llm_api_key="sk-text",
+            llm_api_key=_FAKE_LLM,
             vlm_model="qwen-vl-max",
-            vlm_api_key="sk-vision",
+            vlm_api_key=_FAKE_VLM,
         )
         provider = build_provider(settings, purpose="vision")
         assert provider.model == "qwen-vl-max"
-        assert provider.api_key == "sk-vision"
+        assert provider.api_key == _FAKE_VLM
         provider.close()
 
     def test_missing_api_key_raises_readable_error(self):
@@ -140,13 +145,13 @@ class TestProviderFactory:
 
     def test_invalid_protocol_raises(self):
         """绕过 pydantic 校验注入非法协议，验证工厂自身的兜底分支。"""
-        settings = _settings(llm_api_key="sk-test")
+        settings = _settings(llm_api_key=_FAKE_LLM)
         settings.llm_protocol = "carrier-pigeon"  # type: ignore[assignment]
         with pytest.raises(ValueError, match="不支持"):
             build_provider(settings)
 
     def test_usage_starts_empty(self):
-        provider = build_provider(_settings(llm_api_key="sk-test"))
+        provider = build_provider(_settings(llm_api_key=_FAKE_LLM))
         assert provider.usage.total_calls == 0
         provider.close()
 

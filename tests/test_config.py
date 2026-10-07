@@ -12,6 +12,12 @@ import pytest
 
 from xhs_pain_miner.config import Settings, _mask, load_settings
 
+# 假凭据统一走常量间接引用：参数位置不出现密钥形状的字面量，
+# 且断言与构造用的是同一个值。
+_FAKE_LLM = "test-llm"
+_FAKE_VLM = "test-vision"
+_FAKE_LONG = "test-abcdefghijklmnop"
+
 _MANAGED_ENV = (
     "LLM_API_KEY",
     "LLM_PROTOCOL",
@@ -115,19 +121,19 @@ class TestVlmInheritance:
     """VLM 配置的继承规则 —— 让用户只配一个多模态模型即可。"""
 
     def test_inherits_when_unset(self):
-        settings = _settings(llm_model="deepseek-chat", llm_api_key="sk-1")
+        settings = _settings(llm_model="deepseek-chat", llm_api_key=_FAKE_LLM)
         assert settings.effective_vlm_model == "deepseek-chat"
-        assert settings.effective_vlm_api_key == "sk-1"
+        assert settings.effective_vlm_api_key == _FAKE_LLM
 
     def test_own_values_win(self):
         settings = _settings(
             llm_model="deepseek-chat",
-            llm_api_key="sk-text",
+            llm_api_key=_FAKE_LLM,
             vlm_model="qwen-vl-max",
-            vlm_api_key="sk-vision",
+            vlm_api_key=_FAKE_VLM,
         )
         assert settings.effective_vlm_model == "qwen-vl-max"
-        assert settings.effective_vlm_api_key == "sk-vision"
+        assert settings.effective_vlm_api_key == _FAKE_VLM
 
     def test_empty_base_url_does_not_fall_back(self):
         """显式设为空串表示「用协议默认端点」，不应继承 LLM 的 base_url。"""
@@ -135,8 +141,8 @@ class TestVlmInheritance:
         assert settings.effective_vlm_base_url == ""
 
     def test_embedding_falls_back_to_llm_key(self):
-        settings = _settings(llm_api_key="sk-1", embedding_provider="api")
-        assert settings.effective_embedding_api_key == "sk-1"
+        settings = _settings(llm_api_key=_FAKE_LLM, embedding_provider="api")
+        assert settings.effective_embedding_api_key == _FAKE_LLM
 
 
 class TestMask:
@@ -155,7 +161,7 @@ class TestMask:
         assert _mask("abc") == "ab***"
 
     def test_settings_mask_helpers(self):
-        settings = _settings(llm_api_key="sk-abcdefghijklmnop")
+        settings = _settings(llm_api_key=_FAKE_LONG)
         assert "defghijkl" not in settings.masked_llm_key()
         assert "defghijkl" not in settings.masked_vlm_key()
 
@@ -170,9 +176,9 @@ class TestLoadSettings:
         assert settings.llm_model == "deepseek-chat"
 
     def test_applies_overrides(self):
-        settings = load_settings(llm_model="gpt-4o", llm_api_key="sk-x")
+        settings = load_settings(llm_model="gpt-4o", llm_api_key=_FAKE_LLM)
         assert settings.llm_model == "gpt-4o"
-        assert settings.llm_api_key == "sk-x"
+        assert settings.llm_api_key == _FAKE_LLM
 
 
 class TestPaths:

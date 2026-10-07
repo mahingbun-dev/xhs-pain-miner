@@ -28,6 +28,11 @@ from xhs_pain_miner.pipeline.embed import (
     cosine_similarity,
 )
 
+# 假凭据统一走常量间接引用：参数位置不出现密钥形状的字面量，
+# 且断言与构造用的是同一个值。
+_FAKE_LLM = "test-from-llm"
+_FAKE_EMBED = "test-embedding"
+
 Handler = Callable[[httpx.Request], httpx.Response]
 
 
@@ -495,24 +500,24 @@ class TestBuildEmbedder:
             embedding_provider="api",
             embedding_model="text-embedding-3-small",
             embedding_base_url="https://api.siliconflow.cn/v1",
-            llm_api_key="sk-from-llm",
+            llm_api_key=_FAKE_LLM,
         )
         embedder = build_embedder(settings)
         assert isinstance(embedder, ApiEmbedder)
         assert embedder.model == "text-embedding-3-small"
-        assert embedder.api_key == "sk-from-llm"
+        assert embedder.api_key == _FAKE_LLM
         assert embedder.base_url == "https://api.siliconflow.cn/v1"
         embedder.close()
 
     def test_api_provider_prefers_dedicated_key(self):
         settings = Settings(
             embedding_provider="api",
-            embedding_api_key="sk-embedding",
-            llm_api_key="sk-from-llm",
+            embedding_api_key=_FAKE_EMBED,
+            llm_api_key=_FAKE_LLM,
         )
         embedder = build_embedder(settings)
         assert isinstance(embedder, ApiEmbedder)
-        assert embedder.api_key == "sk-embedding"
+        assert embedder.api_key == _FAKE_EMBED
 
 
 # --------------------------------------------------------------------------- #
