@@ -1,13 +1,13 @@
 ---
-name: xhs-pain-miner
-slug: xhs-pain-miner
-displayName: 小红书痛点挖掘
+name: note-pain-miner
+slug: note-pain-miner
+displayName: 内容痛点挖掘
 version: 1.0.1
 summary: 输入品类关键词，聚类小红书真实痛点，输出带机会分的产品机会卡片
 description: 从小红书用户痛点中发现可做的产品机会。输入品类关键词，自动聚类笔记与评论中的真实痛点，调研市面上已有的竞品工具，输出带机会分的机会卡片。触发词：找方向、做什么产品、痛点挖掘、机会发现、需求验证、小红书分析、品类机会、独立开发选题。
 ---
 
-# 🔍 XHS Pain Miner — 从痛点到机会
+# 🔍 Pain Miner — 从痛点到机会
 
 ## 能力
 
