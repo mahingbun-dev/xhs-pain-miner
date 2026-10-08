@@ -28,12 +28,12 @@ from xhs_pain_miner.models import RunCost
 from xhs_pain_miner.pain_miner import _NOT_SEARCHED_WARNING, normalize_keyword
 from xhs_pain_miner.research import appstore as appstore_module
 from xhs_pain_miner.research import github as github_module
+from xhs_pain_miner.research import query, relevance
+from xhs_pain_miner.scoring.opportunity import NEUTRAL
 
 # 假凭据统一走常量间接引用：参数位置不出现密钥形状的字面量，
 # 且断言与构造用的是同一个值。
 _FAKE_INLINE = "test-inline"
-from xhs_pain_miner.research import query, relevance
-from xhs_pain_miner.scoring.opportunity import NEUTRAL
 
 _MANAGED_ENV = (
     "LLM_API_KEY",
